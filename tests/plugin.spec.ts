@@ -28,11 +28,14 @@ async function call(ctx: Context, name: string, args: Record<string, unknown>): 
 }
 
 describe('registration', () => {
-  it('registers the three memory tools', async () => {
+  it('registers all model-facing memory tools', async () => {
     const ctx = await harness()
 
     expect(ctx.tools.get('memory_write')).toBeDefined()
+    expect(ctx.tools.get('memory_update')).toBeDefined()
     expect(ctx.tools.get('memory_search')).toBeDefined()
+    expect(ctx.tools.get('memory_stats')).toBeDefined()
+    expect(ctx.tools.get('memory_review')).toBeDefined()
     expect(ctx.tools.get('memory_forget')).toBeDefined()
     await ctx.fiber.dispose()
   })
