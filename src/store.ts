@@ -1,8 +1,9 @@
 /**
  * SQLite-backed curated memory store for DeepSeek Harness.
  *
- * Schema v2 adds deterministic ranking/curation metadata while keeping the
- * original FTS5 design: no embeddings, API key, sidecar process or second LLM.
+ * The current schema adds deterministic ranking, scopes, archive lifecycle,
+ * and canonical keys while keeping the original FTS5 design: no embeddings,
+ * API key, sidecar process or second LLM.
  * @module dsh-memory/store
  */
 
