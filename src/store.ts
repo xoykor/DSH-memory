@@ -296,6 +296,7 @@ export class MemoryStore {
         `)
         this.#db.exec(DERIVED_SCHEMA)
         this.#db.exec(UPDATE_TRIGGER)
+        this.#db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
         this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
         this.#db.exec('COMMIT')
       } catch (error) {
@@ -315,6 +316,7 @@ export class MemoryStore {
         `)
         this.#db.exec(DERIVED_SCHEMA)
         this.#db.exec(UPDATE_TRIGGER)
+        this.#db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
         this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
         this.#db.exec('COMMIT')
       } catch (error) {
@@ -332,6 +334,7 @@ export class MemoryStore {
         `)
         this.#db.exec(DERIVED_SCHEMA)
         this.#db.exec(UPDATE_TRIGGER)
+        this.#db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
         this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
         this.#db.exec('COMMIT')
       } catch (error) {
