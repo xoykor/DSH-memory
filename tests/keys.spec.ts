@@ -219,6 +219,71 @@ describe('canonical keys through model-facing tools', () => {
     await ctx.fiber.dispose()
   })
 
+  it('keeps distinct canonical identities separate even when text is identical', async () => {
+    const ctx = await harness({ dedupSimilarityThreshold: 0.9 })
+    const runtime = await call(ctx, 'memory_write', {
+      text: 'Value is enabled',
+      scope: 'project:test',
+      key: 'project.runtime-enabled',
+    })
+    const feature = await call(ctx, 'memory_write', {
+      text: 'Value is enabled',
+      scope: 'project:test',
+      key: 'project.feature-enabled',
+    })
+
+    expect(feature.id).not.toBe(runtime.id)
+    expect(feature.deduplicated).toBe(false)
+    expect(feature.conflict).toBe(false)
+    expect(feature.key).toBe('project.feature-enabled')
+
+    await ctx.fiber.dispose()
+  })
+
+  it('can adopt an unkeyed duplicate into a canonical key', async () => {
+    const ctx = await harness()
+    const unkeyed = await call(ctx, 'memory_write', {
+      text: 'Project package manager is pnpm',
+      scope: 'project:test',
+    })
+    const keyed = await call(ctx, 'memory_write', {
+      text: 'Project package manager is pnpm',
+      scope: 'project:test',
+      key: 'project.package-manager',
+    })
+
+    expect(keyed.id).toBe(unkeyed.id)
+    expect(keyed.deduplicated).toBe(true)
+    expect(keyed.key).toBe('project.package-manager')
+
+    await ctx.fiber.dispose()
+  })
+
+  it('allows archived history to be edited even when an active replacement matches it', async () => {
+    const ctx = await harness()
+    const old = await call(ctx, 'memory_write', {
+      text: 'Runtime used to be Node 22',
+      scope: 'project:test',
+      key: 'project.runtime',
+    })
+    await call(ctx, 'memory_update', { id: old.id, archived: true })
+
+    await call(ctx, 'memory_write', {
+      text: 'Runtime is Node 24',
+      scope: 'project:test',
+      key: 'project.runtime',
+    })
+
+    const editedArchive = await call(ctx, 'memory_update', {
+      id: old.id,
+      text: 'Runtime is Node 24',
+    })
+    expect(editedArchive.updated).toBe(true)
+    expect(editedArchive.archived).toBe(true)
+
+    await ctx.fiber.dispose()
+  })
+
   it('rejects assigning an active key already owned by another memory', async () => {
     const ctx = await harness({ dedupSimilarityThreshold: 1 })
     const one = await call(ctx, 'memory_write', {
