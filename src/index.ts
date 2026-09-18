@@ -71,7 +71,8 @@ const WRITE_DESCRIPTION =
   + 'project:<name>, or workspace:<name>.'
 
 const UPDATE_DESCRIPTION =
-  'Correct or refine an existing durable memory in place. Prefer this over creating a stale second copy.'
+  'Correct or refine an existing durable memory in place. Prefer this over creating a stale second copy. '
+  + 'Set archived=true to remove a memory from normal recall without deleting it; set archived=false to restore it.'
 
 const REVIEW_DESCRIPTION =
   'Review likely duplicate and stale memories using deterministic local metadata. '
@@ -357,6 +358,10 @@ export function apply(ctx: Context, config: Config): void {
         type: 'string',
         description: 'Replacement scope, e.g. global, project:<name>, workspace:<name>.',
       },
+      archived: {
+        type: 'boolean',
+        description: 'Archive without deleting, or restore an archived memory.',
+      },
     },
     output: {
       schema: {
@@ -370,6 +375,7 @@ export function apply(ctx: Context, config: Config): void {
           pinned: { type: 'boolean' },
           importance: { type: 'integer' },
           scope: { type: 'string' },
+          archived: { type: 'boolean' },
         },
       },
       render: (_args, value) => [{
@@ -390,6 +396,7 @@ export function apply(ctx: Context, config: Config): void {
         && args.pinned === undefined
         && args.importance === undefined
         && args.scope === undefined
+        && args.archived === undefined
       ) {
         throw new Error('memory_update: provide at least one field to change')
       }
@@ -413,7 +420,8 @@ export function apply(ctx: Context, config: Config): void {
         : current.scope
       const replacementText = text ?? current.text
 
-      if (text !== undefined || scope !== current.scope) {
+      const restoring = current.archived && args.archived === false
+      if (text !== undefined || scope !== current.scope || restoring) {
         const exact = open().findExact(replacementText, args.id, scope)
         if (exact) {
           throw new Error(
@@ -440,6 +448,7 @@ export function apply(ctx: Context, config: Config): void {
         pinned?: boolean
         importance?: number
         scope?: string
+        archived?: boolean
       } = {}
 
       if (text !== undefined) patch.text = text
@@ -449,6 +458,7 @@ export function apply(ctx: Context, config: Config): void {
         patch.importance = validateImportance(args.importance, 'memory_update')
       }
       if (args.scope !== undefined) patch.scope = scope
+      if (args.archived !== undefined) patch.archived = args.archived
 
       const record = open().update(args.id, patch)
       if (!record) return { id: args.id, updated: false }
@@ -461,6 +471,7 @@ export function apply(ctx: Context, config: Config): void {
         pinned: record.pinned,
         importance: record.importance,
         scope: record.scope,
+        archived: record.archived,
       }
     },
   }))
@@ -482,6 +493,10 @@ export function apply(ctx: Context, config: Config): void {
         type: 'string',
         description: 'Optional exact scope filter. Omit to search all scopes.',
       },
+      includeArchived: {
+        type: 'boolean',
+        description: 'Include archived memories. Defaults to false.',
+      },
     },
     output: {
       schema: {
@@ -502,6 +517,7 @@ export function apply(ctx: Context, config: Config): void {
                 importance: { type: 'integer', required: true },
                 scope: { type: 'string', required: true },
                 accessCount: { type: 'integer', required: true },
+                archived: { type: 'boolean', required: true },
               },
             },
           },
@@ -513,7 +529,8 @@ export function apply(ctx: Context, config: Config): void {
           ? `No memories match ${JSON.stringify(args.query)}.`
           : value.matches.map(match => {
               const tags = match.tags.length > 0 ? ` [${match.tags}]` : ''
-              return `- (#${match.id}, importance=${match.importance}, scope=${match.scope})${tags} ${match.text}`
+              const archived = match.archived ? ', archived' : ''
+              return `- (#${match.id}, importance=${match.importance}, scope=${match.scope}${archived})${tags} ${match.text}`
             }).join('\n'),
       }],
       presentationMeta: (_args, value) => ({ count: value.matches.length }),
@@ -538,6 +555,7 @@ export function apply(ctx: Context, config: Config): void {
         args.query,
         Math.min(requested, config.searchLimitMax),
         scope,
+        args.includeArchived ?? false,
       )
 
       return {
@@ -549,6 +567,7 @@ export function apply(ctx: Context, config: Config): void {
           importance: record.importance,
           scope: record.scope,
           accessCount: record.accessCount,
+          archived: record.archived,
         })),
       }
     },
@@ -657,7 +676,7 @@ export function apply(ctx: Context, config: Config): void {
       )
 
       return {
-        scanned: Math.min(open().count(scope), config.reviewScanLimit),
+        scanned: Math.min(open().count(scope, false), config.reviewScanLimit),
         pairs: pairs.map(pair => ({
           leftId: pair.left.id,
           rightId: pair.right.id,
