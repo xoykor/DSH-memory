@@ -42,6 +42,7 @@ Curation is deterministic and local:
 | `memory_write` | Store a durable fact, deduplicate it, or report a canonical-key conflict |
 | `memory_update` | Correct text/metadata/key/scope or archive/restore in place |
 | `memory_search` | FTS5 retrieval across all scopes or one exact scope; archive history is optional |
+| `memory_stats` | Read-only health summary: active/archive/pinned/keyed/stale counts by scope and importance |
 | `memory_review` | Find likely duplicate pairs and stale candidates |
 | `memory_forget` | Permanently delete an obsolete memory |
 
@@ -192,6 +193,26 @@ Permanent deletion remains:
 
 ```text
 memory_forget(id)
+```
+
+## Memory health
+
+`memory_stats` is a read-only diagnostic. It reports:
+
+- total, active and archived memories;
+- active pinned memories;
+- active canonical-key memories;
+- stale candidates under the current `staleAfterDays` policy;
+- active/archive counts by scope;
+- active counts by importance.
+
+It deliberately **does not increment `access_count`**, so inspecting memory health cannot bias future recall ranking.
+
+Example:
+
+```text
+memory_stats()
+memory_stats(scope = "project:dsh-memory")
 ```
 
 ## Stale review
