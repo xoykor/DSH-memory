@@ -50,6 +50,28 @@ export interface MemoryReviewPair {
   similarity: number
 }
 
+export interface MemoryScopeStats {
+  scope: string
+  active: number
+  archived: number
+}
+
+export interface MemoryImportanceStats {
+  importance: number
+  active: number
+}
+
+export interface MemoryStats {
+  total: number
+  active: number
+  archived: number
+  pinned: number
+  keyed: number
+  stale: number
+  scopes: MemoryScopeStats[]
+  importance: MemoryImportanceStats[]
+}
+
 interface MemoryRow {
   id: number
   text: string
@@ -628,6 +650,66 @@ export class MemoryStore {
         `).all(scope, cutoff, limit) as unknown as MemoryRow[]
 
     return rows.map(toRecord)
+  }
+
+  stats(staleAfterDays: number, scope = '*', now = Date.now()): MemoryStats {
+    const cutoff = now - staleAfterDays * DAY_MS
+    const where = scope === '*' ? '' : ' WHERE scope = ?'
+    const params = scope === '*' ? [] : [scope]
+
+    const totals = this.#db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN archived = 0 THEN 1 ELSE 0 END), 0) AS active,
+        COALESCE(SUM(CASE WHEN archived = 1 THEN 1 ELSE 0 END), 0) AS archived,
+        COALESCE(SUM(CASE WHEN archived = 0 AND pinned = 1 THEN 1 ELSE 0 END), 0) AS pinned,
+        COALESCE(SUM(CASE WHEN archived = 0 AND memory_key <> '' THEN 1 ELSE 0 END), 0) AS keyed,
+        COALESCE(SUM(CASE
+          WHEN archived = 0
+           AND pinned = 0
+           AND importance < 5
+           AND MAX(updated_at, COALESCE(last_accessed, 0)) < ?
+          THEN 1 ELSE 0 END), 0) AS stale
+      FROM memories
+      ${where}
+    `).get(cutoff, ...params) as unknown as {
+      total: number
+      active: number
+      archived: number
+      pinned: number
+      keyed: number
+      stale: number
+    }
+
+    const scopes = this.#db.prepare(`
+      SELECT
+        scope,
+        COALESCE(SUM(CASE WHEN archived = 0 THEN 1 ELSE 0 END), 0) AS active,
+        COALESCE(SUM(CASE WHEN archived = 1 THEN 1 ELSE 0 END), 0) AS archived
+      FROM memories
+      ${where}
+      GROUP BY scope
+      ORDER BY active DESC, archived DESC, scope ASC
+    `).all(...params) as unknown as MemoryScopeStats[]
+
+    const importance = this.#db.prepare(`
+      SELECT importance, COUNT(*) AS active
+      FROM memories
+      ${scope === '*' ? 'WHERE archived = 0' : 'WHERE scope = ? AND archived = 0'}
+      GROUP BY importance
+      ORDER BY importance DESC
+    `).all(...params) as unknown as MemoryImportanceStats[]
+
+    return {
+      total: totals.total,
+      active: totals.active,
+      archived: totals.archived,
+      pinned: totals.pinned,
+      keyed: totals.keyed,
+      stale: totals.stale,
+      scopes,
+      importance,
+    }
   }
 
   forget(id: number): boolean {
