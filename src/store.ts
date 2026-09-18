@@ -10,7 +10,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 const DAY_MS = 86_400_000
 
 export interface MemoryRecord {
@@ -22,6 +22,8 @@ export interface MemoryRecord {
   importance: number
   /** global, project:<id>, workspace:<id>, or another explicit local scope. */
   scope: string
+  /** Optional canonical identity, unique among active memories inside a scope. */
+  key: string
   createdAt: number
   updatedAt: number
   lastAccessed: number | null
@@ -54,6 +56,7 @@ interface MemoryRow {
   pinned: number
   importance: number
   scope: string
+  memory_key: string
   created_at: number
   updated_at: number
   last_accessed: number | null
@@ -71,6 +74,7 @@ const CREATE_LATEST = `
     pinned INTEGER NOT NULL DEFAULT 0,
     importance INTEGER NOT NULL DEFAULT 3,
     scope TEXT NOT NULL DEFAULT 'global',
+    memory_key TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     last_accessed INTEGER,
@@ -89,6 +93,9 @@ const DERIVED_SCHEMA = `
     ON memories (archived, archived_at DESC);
   CREATE INDEX IF NOT EXISTS memories_access
     ON memories (last_accessed DESC, access_count DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS memories_active_key
+    ON memories (scope, memory_key)
+    WHERE archived = 0 AND memory_key <> '';
 
   CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
     USING fts5(text, tags, content='memories', content_rowid='id');
@@ -145,6 +152,17 @@ export function normalizeScope(scope: string): string {
     .replace(/\s+/g, '-')
 }
 
+/** Normalize an optional canonical memory key. Empty means "no key". */
+export function normalizeMemoryKey(key: string): string {
+  return key
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9._:-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
 /** Token-set Jaccard similarity in [0, 1]. */
 export function lexicalSimilarity(left: string, right: string): number {
   const a = new Set(normalizeMemoryText(left).split(' ').filter(Boolean))
@@ -196,6 +214,7 @@ function toRecord(row: MemoryRow): MemoryRecord {
     pinned: row.pinned !== 0,
     importance: row.importance,
     scope: row.scope,
+    key: row.memory_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastAccessed: row.last_accessed,
@@ -232,7 +251,8 @@ export class MemoryStore {
       ).get() as unknown as { yes: number } | undefined
       if (exists) {
         const columns = this.#db.prepare('PRAGMA table_info(memories)').all() as unknown as { name: string }[]
-        if (columns.some(column => column.name === 'archived')) version = 3
+        if (columns.some(column => column.name === 'memory_key')) version = 4
+        else if (columns.some(column => column.name === 'archived')) version = 3
         else if (columns.some(column => column.name === 'importance')) version = 2
         else version = 1
       }
@@ -268,6 +288,7 @@ export class MemoryStore {
         this.#db.exec(`
           ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 3;
           ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'global';
+          ALTER TABLE memories ADD COLUMN memory_key TEXT NOT NULL DEFAULT '';
           ALTER TABLE memories ADD COLUMN last_accessed INTEGER;
           ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
           ALTER TABLE memories ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
@@ -290,6 +311,24 @@ export class MemoryStore {
         this.#db.exec(`
           ALTER TABLE memories ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
           ALTER TABLE memories ADD COLUMN archived_at INTEGER;
+          ALTER TABLE memories ADD COLUMN memory_key TEXT NOT NULL DEFAULT '';
+        `)
+        this.#db.exec(DERIVED_SCHEMA)
+        this.#db.exec(UPDATE_TRIGGER)
+        this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+        this.#db.exec('COMMIT')
+      } catch (error) {
+        this.#db.exec('ROLLBACK')
+        throw error
+      }
+      return
+    }
+
+    if (version === 3) {
+      this.#db.exec('BEGIN')
+      try {
+        this.#db.exec(`
+          ALTER TABLE memories ADD COLUMN memory_key TEXT NOT NULL DEFAULT '';
         `)
         this.#db.exec(DERIVED_SCHEMA)
         this.#db.exec(UPDATE_TRIGGER)
@@ -319,13 +358,14 @@ export class MemoryStore {
     pinned: boolean,
     importance = 3,
     scope = 'global',
+    key = '',
   ): MemoryRecord {
     const now = Date.now()
     const statement = this.#db.prepare(`
       INSERT INTO memories
-        (text, tags, pinned, importance, scope, created_at, updated_at,
+        (text, tags, pinned, importance, scope, memory_key, created_at, updated_at,
          last_accessed, access_count, archived, archived_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, NULL)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, NULL)
       RETURNING *
     `)
     return toRecord(statement.get(
@@ -334,6 +374,7 @@ export class MemoryStore {
       pinned ? 1 : 0,
       importance,
       scope,
+      key,
       now,
       now,
     ) as unknown as MemoryRow)
@@ -342,6 +383,15 @@ export class MemoryStore {
   get(id: number): MemoryRecord | undefined {
     const row = this.#db.prepare('SELECT * FROM memories WHERE id = ?')
       .get(id) as unknown as MemoryRow | undefined
+    return row ? toRecord(row) : undefined
+  }
+
+  findByKey(key: string, scope = 'global', includeArchived = false): MemoryRecord | undefined {
+    if (key.length === 0) return undefined
+    const archived = includeArchived ? '' : ' AND archived = 0'
+    const row = this.#db.prepare(
+      `SELECT * FROM memories WHERE scope = ? AND memory_key = ?${archived} ORDER BY archived ASC, updated_at DESC LIMIT 1`,
+    ).get(scope, key) as unknown as MemoryRow | undefined
     return row ? toRecord(row) : undefined
   }
 
@@ -391,6 +441,7 @@ export class MemoryStore {
       pinned?: boolean
       importance?: number
       scope?: string
+      key?: string
       archived?: boolean
     },
   ): MemoryRecord | undefined {
@@ -404,7 +455,7 @@ export class MemoryStore {
       : null
     const row = this.#db.prepare(`
       UPDATE memories
-      SET text = ?, tags = ?, pinned = ?, importance = ?, scope = ?,
+      SET text = ?, tags = ?, pinned = ?, importance = ?, scope = ?, memory_key = ?,
           archived = ?, archived_at = ?, updated_at = ?
       WHERE id = ?
       RETURNING *
@@ -414,6 +465,7 @@ export class MemoryStore {
       (patch.pinned ?? current.pinned) ? 1 : 0,
       patch.importance ?? current.importance,
       patch.scope ?? current.scope,
+      patch.key ?? current.key,
       archived ? 1 : 0,
       archivedAt,
       now,
