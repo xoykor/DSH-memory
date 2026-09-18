@@ -2,22 +2,34 @@
 
 Curated durable memory for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-This repository starts from the lightweight design of [ben7am1n/dsh-memory](https://github.com/ben7am1n/dsh-memory): one local SQLite database with FTS5, no embedding service, no API key, and no sidecar model.
+This fork keeps the lightweight architecture of [ben7am1n/dsh-memory](https://github.com/ben7am1n/dsh-memory): one local SQLite file with FTS5, **no embedding service, no API key, no sidecar process, and no second model**.
 
-This fork adds deterministic curation while keeping that architecture small:
+## First curation layer
 
-- exact and high-confidence lexical deduplication before writes;
-- `memory_update` for correcting durable facts instead of accumulating stale copies;
-- importance (1-5), access counters, and last-access timestamps;
-- prompt selection that considers importance and actual retrieval use;
-- `memory_review` for bounded duplicate/stale-memory review;
-- schema migration from the original v1 database;
-- no second LLM and no embedding model.
+| Tool | Purpose |
+|---|---|
+| `memory_write` | Stores durable facts and suppresses exact/high-confidence lexical duplicates |
+| `memory_update` | Corrects an existing memory in place |
+| `memory_search` | FTS5 keyword retrieval |
+| `memory_review` | Read-only bounded scan for likely duplicate pairs |
+| `memory_forget` | Deletes obsolete memories |
 
-## Status
+Deduplication uses normalized Unicode text plus token-set Jaccard similarity. The automatic threshold defaults to `0.90`; review defaults to `0.65` and never mutates data.
 
-Initial curated implementation is being built directly in this repository. The storage format remains SQLite + FTS5 and is intended to stay offline-first.
+## Configuration
 
-## License and upstream
+The existing database schema remains unchanged and compatible with upstream v1.
 
-MIT. Based on the MIT-licensed architecture/code of `ben7am1n/dsh-memory`; see `LICENSE` and the upstream repository for the original project.
+```yaml
+dedupSimilarityThreshold: 0.90
+reviewSimilarityThreshold: 0.65
+reviewScanLimit: 1000
+```
+
+## Roadmap
+
+Next: importance, access-frequency ranking, stale-memory decay and scopes. Those require a schema migration and will be added separately.
+
+## License / upstream
+
+MIT. Based on the MIT-licensed `ben7am1n/dsh-memory`.
