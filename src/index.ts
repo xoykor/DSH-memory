@@ -10,7 +10,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { MemoryStore, normalizeScope, normalizeTags } from './store.ts'
+import {
+  MemoryStore,
+  lexicalSimilarity,
+  normalizeMemoryKey,
+  normalizeMemoryText,
+  normalizeScope,
+  normalizeTags,
+} from './store.ts'
 import type { MemoryRecord } from './store.ts'
 
 export type * from './store.ts'
@@ -68,7 +75,8 @@ const WRITE_DESCRIPTION =
   + 'decisions/reasons, or hard-won environment details. Do NOT store transient task state, secrets, '
   + 'or facts already available in the repository. Use importance 1-5 deliberately: 3 is normal; '
   + '5 is reserved for durable facts that should resist stale review. Use scopes such as global, '
-  + 'project:<name>, or workspace:<name>.'
+  + 'project:<name>, or workspace:<name>. When a fact has one canonical identity, optionally give it '
+  + 'a stable key such as environment.shell or project.runtime.'
 
 const UPDATE_DESCRIPTION =
   'Correct or refine an existing durable memory in place. Prefer this over creating a stale second copy. '
@@ -91,6 +99,7 @@ function promptLine(record: MemoryRecord): string {
   if (record.pinned) meta.push('pinned')
   if (record.importance !== 3) meta.push(`importance=${record.importance}`)
   if (record.scope !== 'global') meta.push(`scope=${record.scope}`)
+  if (record.key.length > 0) meta.push(`key=${record.key}`)
   const suffix = meta.length > 0 ? `, ${meta.join(', ')}` : ''
   return `- (#${record.id}${suffix})${tags} ${record.text}`
 }
@@ -131,6 +140,18 @@ function validateScope(value: string, tool: string): string {
   const normalized = normalizeScope(value)
   if (normalized.length === 0) throw new Error(`${tool}: \`scope\` must not be blank`)
   if (normalized.length > 120) throw new Error(`${tool}: \`scope\` must be at most 120 characters`)
+  return normalized
+}
+
+function validateKey(value: string, tool: string): string {
+  if (value.trim().length === 0) return ''
+  const normalized = normalizeMemoryKey(value)
+  if (normalized.length === 0) {
+    throw new Error(`${tool}: \`key\` contains no usable characters`)
+  }
+  if (normalized.length > 120) {
+    throw new Error(`${tool}: \`key\` must be at most 120 characters`)
+  }
   return normalized
 }
 
@@ -244,6 +265,10 @@ export function apply(ctx: Context, config: Config): void {
         type: 'string',
         description: `Memory scope. Defaults to ${JSON.stringify(defaultScope)}.`,
       },
+      key: {
+        type: 'string',
+        description: 'Optional canonical key unique among active memories in this scope.',
+      },
     },
     output: {
       schema: {
@@ -255,15 +280,20 @@ export function apply(ctx: Context, config: Config): void {
           pinned: { type: 'boolean', required: true },
           importance: { type: 'integer', required: true },
           scope: { type: 'string', required: true },
+          key: { type: 'string', required: true },
           deduplicated: { type: 'boolean', required: true },
+          conflict: { type: 'boolean', required: true },
+          existingText: { type: 'string' },
           similarity: { type: 'number' },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.deduplicated
-          ? `Reused memory #${value.id} in ${value.scope} instead of storing a duplicate.`
-          : `Stored memory #${value.id} in ${value.scope}.`,
+        text: value.conflict
+          ? `Canonical key ${value.key} in ${value.scope} already belongs to memory #${value.id} with different text; use memory_update explicitly if the fact changed.`
+          : value.deduplicated
+            ? `Reused memory #${value.id} in ${value.scope} instead of storing a duplicate.`
+            : `Stored memory #${value.id} in ${value.scope}.`,
       }],
     },
     presentCall: args => ({
@@ -285,6 +315,47 @@ export function apply(ctx: Context, config: Config): void {
       const pinned = args.pinned ?? false
       const importance = validateImportance(args.importance ?? 3, 'memory_write')
       const scope = validateScope(args.scope ?? defaultScope, 'memory_write')
+      const key = args.key === undefined ? '' : validateKey(args.key, 'memory_write')
+
+      if (key.length > 0) {
+        const keyed = open().findByKey(key, scope)
+        if (keyed) {
+          const similarity = lexicalSimilarity(text, keyed.text)
+          if (
+            normalizeMemoryText(text) === normalizeMemoryText(keyed.text)
+            || similarity >= config.dedupSimilarityThreshold
+          ) {
+            const merged = open().update(keyed.id, {
+              tags: mergeTagStrings(keyed.tags, tags),
+              pinned: keyed.pinned || pinned,
+              importance: Math.max(keyed.importance, importance),
+            }) ?? keyed
+            return {
+              id: merged.id,
+              tags: merged.tags,
+              pinned: merged.pinned,
+              importance: merged.importance,
+              scope: merged.scope,
+              key: merged.key,
+              deduplicated: true,
+              conflict: false,
+              similarity,
+            }
+          }
+
+          return {
+            id: keyed.id,
+            tags: keyed.tags,
+            pinned: keyed.pinned,
+            importance: keyed.importance,
+            scope: keyed.scope,
+            key: keyed.key,
+            deduplicated: false,
+            conflict: true,
+            existingText: keyed.text,
+          }
+        }
+      }
 
       const exact = open().findExact(text, undefined, scope)
       if (exact) {
@@ -292,6 +363,7 @@ export function apply(ctx: Context, config: Config): void {
           tags: mergeTagStrings(exact.tags, tags),
           pinned: exact.pinned || pinned,
           importance: Math.max(exact.importance, importance),
+          key: exact.key.length === 0 ? key : exact.key,
         }) ?? exact
         return {
           id: merged.id,
@@ -299,7 +371,9 @@ export function apply(ctx: Context, config: Config): void {
           pinned: merged.pinned,
           importance: merged.importance,
           scope: merged.scope,
+          key: merged.key,
           deduplicated: true,
+          conflict: false,
           similarity: 1,
         }
       }
@@ -317,6 +391,7 @@ export function apply(ctx: Context, config: Config): void {
           tags: mergeTagStrings(similar.record.tags, tags),
           pinned: similar.record.pinned || pinned,
           importance: Math.max(similar.record.importance, importance),
+          key: similar.record.key.length === 0 ? key : similar.record.key,
         }) ?? similar.record
         return {
           id: merged.id,
@@ -324,19 +399,23 @@ export function apply(ctx: Context, config: Config): void {
           pinned: merged.pinned,
           importance: merged.importance,
           scope: merged.scope,
+          key: merged.key,
           deduplicated: true,
+          conflict: false,
           similarity: similar.similarity,
         }
       }
 
-      const record = open().write(text, tags, pinned, importance, scope)
+      const record = open().write(text, tags, pinned, importance, scope, key)
       return {
         id: record.id,
         tags: record.tags,
         pinned: record.pinned,
         importance: record.importance,
         scope: record.scope,
+        key: record.key,
         deduplicated: false,
+        conflict: false,
       }
     },
   }))
@@ -358,6 +437,10 @@ export function apply(ctx: Context, config: Config): void {
         type: 'string',
         description: 'Replacement scope, e.g. global, project:<name>, workspace:<name>.',
       },
+      key: {
+        type: 'string',
+        description: 'Replacement canonical key. Pass an empty string to clear it.',
+      },
       archived: {
         type: 'boolean',
         description: 'Archive without deleting, or restore an archived memory.',
@@ -375,6 +458,7 @@ export function apply(ctx: Context, config: Config): void {
           pinned: { type: 'boolean' },
           importance: { type: 'integer' },
           scope: { type: 'string' },
+          key: { type: 'string' },
           archived: { type: 'boolean' },
         },
       },
@@ -396,6 +480,7 @@ export function apply(ctx: Context, config: Config): void {
         && args.pinned === undefined
         && args.importance === undefined
         && args.scope === undefined
+        && args.key === undefined
         && args.archived === undefined
       ) {
         throw new Error('memory_update: provide at least one field to change')
@@ -419,6 +504,19 @@ export function apply(ctx: Context, config: Config): void {
         ? validateScope(args.scope, 'memory_update')
         : current.scope
       const replacementText = text ?? current.text
+      const key = args.key !== undefined
+        ? validateKey(args.key, 'memory_update')
+        : current.key
+      const targetArchived = args.archived ?? current.archived
+
+      if (!targetArchived && key.length > 0) {
+        const keyOwner = open().findByKey(key, scope)
+        if (keyOwner && keyOwner.id !== current.id) {
+          throw new Error(
+            `memory_update: canonical key ${key} already belongs to memory #${keyOwner.id} in scope ${scope}`,
+          )
+        }
+      }
 
       const restoring = current.archived && args.archived === false
       if (text !== undefined || scope !== current.scope || restoring) {
@@ -448,6 +546,7 @@ export function apply(ctx: Context, config: Config): void {
         pinned?: boolean
         importance?: number
         scope?: string
+        key?: string
         archived?: boolean
       } = {}
 
@@ -458,6 +557,7 @@ export function apply(ctx: Context, config: Config): void {
         patch.importance = validateImportance(args.importance, 'memory_update')
       }
       if (args.scope !== undefined) patch.scope = scope
+      if (args.key !== undefined) patch.key = key
       if (args.archived !== undefined) patch.archived = args.archived
 
       const record = open().update(args.id, patch)
@@ -471,6 +571,7 @@ export function apply(ctx: Context, config: Config): void {
         pinned: record.pinned,
         importance: record.importance,
         scope: record.scope,
+        key: record.key,
         archived: record.archived,
       }
     },
@@ -516,6 +617,7 @@ export function apply(ctx: Context, config: Config): void {
                 pinned: { type: 'boolean', required: true },
                 importance: { type: 'integer', required: true },
                 scope: { type: 'string', required: true },
+                key: { type: 'string', required: true },
                 accessCount: { type: 'integer', required: true },
                 archived: { type: 'boolean', required: true },
               },
@@ -530,7 +632,8 @@ export function apply(ctx: Context, config: Config): void {
           : value.matches.map(match => {
               const tags = match.tags.length > 0 ? ` [${match.tags}]` : ''
               const archived = match.archived ? ', archived' : ''
-              return `- (#${match.id}, importance=${match.importance}, scope=${match.scope}${archived})${tags} ${match.text}`
+              const key = match.key.length > 0 ? `, key=${match.key}` : ''
+              return `- (#${match.id}, importance=${match.importance}, scope=${match.scope}${key}${archived})${tags} ${match.text}`
             }).join('\n'),
       }],
       presentationMeta: (_args, value) => ({ count: value.matches.length }),
@@ -566,6 +669,7 @@ export function apply(ctx: Context, config: Config): void {
           pinned: record.pinned,
           importance: record.importance,
           scope: record.scope,
+          key: record.key,
           accessCount: record.accessCount,
           archived: record.archived,
         })),
