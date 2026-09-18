@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory",
-  "version": "0.2.0",
-  "description": "Durable curated memory for DeepSeek Harness: SQLite FTS5, local dedup/update/review, no embeddings or sidecar model",
+  "version": "0.3.0",
+  "description": "Curated durable memory for DeepSeek Harness: SQLite FTS5, schema v2 ranking/scopes, no embeddings or sidecar model",
   "keywords": [
     "dsh",
     "dsh-plugin",
