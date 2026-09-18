@@ -421,7 +421,12 @@ export class MemoryStore {
     return row ? toRecord(row) : undefined
   }
 
-  findExact(text: string, excludeId?: number, scope = 'global'): MemoryRecord | undefined {
+  findExact(
+    text: string,
+    excludeId?: number,
+    scope = 'global',
+    compatibleKey?: string,
+  ): MemoryRecord | undefined {
     const wanted = normalizeMemoryText(text)
     if (wanted.length === 0) return undefined
 
@@ -429,6 +434,15 @@ export class MemoryStore {
       .all(scope) as unknown as MemoryRow[]
     for (const row of rows) {
       if (excludeId !== undefined && row.id === excludeId) continue
+      // An explicit non-empty key is a stronger identity signal than lexical
+      // similarity. Never collapse two different canonical identities merely
+      // because their current wording happens to match.
+      if (
+        compatibleKey !== undefined
+        && compatibleKey.length > 0
+        && row.memory_key.length > 0
+        && row.memory_key !== compatibleKey
+      ) continue
       if (normalizeMemoryText(row.text) === wanted) return toRecord(row)
     }
     return undefined
@@ -440,12 +454,18 @@ export class MemoryStore {
     limit: number,
     excludeId?: number,
     scope = 'global',
+    compatibleKey?: string,
   ): MemorySimilarity[] {
     const rows = this.#db.prepare('SELECT * FROM memories WHERE scope = ? AND archived = 0')
       .all(scope) as unknown as MemoryRow[]
 
     return rows
       .filter(row => excludeId === undefined || row.id !== excludeId)
+      .filter(row =>
+        compatibleKey === undefined
+        || compatibleKey.length === 0
+        || row.memory_key.length === 0
+        || row.memory_key === compatibleKey)
       .map(row => {
         const record = toRecord(row)
         return { record, similarity: lexicalSimilarity(text, record.text) }
