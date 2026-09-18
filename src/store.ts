@@ -237,6 +237,9 @@ export class MemoryStore {
         this.#db.exec(CREATE_V2)
         this.#db.exec(DERIVED_SCHEMA)
         this.#db.exec(UPDATE_TRIGGER)
+        // Rebuild makes migration robust even if the old derived FTS index was
+        // missing or stale; v1 databases normally already have it populated.
+        this.#db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
         this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
         this.#db.exec('COMMIT')
       } catch (error) {
