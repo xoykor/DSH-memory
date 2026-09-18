@@ -361,7 +361,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
 
-      const exact = open().findExact(text, undefined, scope)
+      const exact = open().findExact(text, undefined, scope, key)
       if (exact) {
         const merged = open().update(exact.id, {
           tags: mergeTagStrings(exact.tags, tags),
@@ -388,6 +388,7 @@ export function apply(ctx: Context, config: Config): void {
         1,
         undefined,
         scope,
+        key,
       )[0]
 
       if (similar) {
@@ -523,8 +524,9 @@ export function apply(ctx: Context, config: Config): void {
       }
 
       const restoring = current.archived && args.archived === false
-      if (text !== undefined || scope !== current.scope || restoring) {
-        const exact = open().findExact(replacementText, args.id, scope)
+      const identityChanged = args.key !== undefined || scope !== current.scope
+      if (!targetArchived && (text !== undefined || identityChanged || restoring)) {
+        const exact = open().findExact(replacementText, args.id, scope, key)
         if (exact) {
           throw new Error(
             `memory_update: replacement duplicates memory #${exact.id} in scope ${scope}`,
@@ -536,6 +538,7 @@ export function apply(ctx: Context, config: Config): void {
           1,
           args.id,
           scope,
+          key,
         )[0]
         if (similar) {
           throw new Error(
