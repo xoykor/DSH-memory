@@ -1,7 +1,8 @@
 /**
- * SQLite-backed memory store: a plain `memories` table with an external-content
- * FTS5 index kept in sync by triggers. Owned entirely by this package — the
- * harness's own SQLite backends index sessions, not durable user facts.
+ * SQLite-backed curated memory store for DeepSeek Harness.
+ *
+ * Schema v2 adds deterministic ranking/curation metadata while keeping the
+ * original FTS5 design: no embeddings, API key, sidecar process or second LLM.
  * @module dsh-memory/store
  */
 
@@ -9,80 +10,101 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-/** Monotonic on-disk schema version; a mismatch rebuilds the derived index. */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
+const DAY_MS = 86_400_000
 
-/** One stored memory as tools and the prompt section see it. */
 export interface MemoryRecord {
   id: number
   text: string
-  /** Normalized, space-joined tag list; empty string when untagged. */
   tags: string
-  /** Pinned memories always render in the prompt section, ahead of recent ones. */
   pinned: boolean
+  /** 1 = low-value/contextual, 3 = normal, 5 = durable/critical. */
+  importance: number
+  /** global, project:<id>, workspace:<id>, or another explicit local scope. */
+  scope: string
   createdAt: number
   updatedAt: number
+  lastAccessed: number | null
+  accessCount: number
 }
 
-/** A search hit: the record plus its FTS rank (lower is a better match). */
 export interface MemoryMatch extends MemoryRecord {
+  /** FTS5 rank; lower is a better lexical match. */
   rank: number
 }
 
-/** A deterministic lexical-similarity candidate. */
 export interface MemorySimilarity {
   record: MemoryRecord
   similarity: number
 }
 
-/** A likely-duplicate pair returned by a review pass. */
 export interface MemoryReviewPair {
   left: MemoryRecord
   right: MemoryRecord
   similarity: number
 }
 
-/** Row shape returned by the statements below, before field-name and boolean normalization. */
 interface MemoryRow {
   id: number
   text: string
   tags: string
   pinned: number
+  importance: number
+  scope: string
   created_at: number
   updated_at: number
+  last_accessed: number | null
+  access_count: number
   rank?: number
 }
 
-const SCHEMA = `
+const CREATE_V2 = `
   CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '',
     pinned INTEGER NOT NULL DEFAULT 0,
+    importance INTEGER NOT NULL DEFAULT 3,
+    scope TEXT NOT NULL DEFAULT 'global',
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    last_accessed INTEGER,
+    access_count INTEGER NOT NULL DEFAULT 0
   );
-  CREATE INDEX IF NOT EXISTS memories_recent ON memories (updated_at DESC, id DESC);
+`
+
+const DERIVED_SCHEMA = `
+  CREATE INDEX IF NOT EXISTS memories_recent
+    ON memories (updated_at DESC, id DESC);
+  CREATE INDEX IF NOT EXISTS memories_scope_priority
+    ON memories (scope, pinned DESC, importance DESC, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS memories_access
+    ON memories (last_accessed DESC, access_count DESC);
+
   CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
     USING fts5(text, tags, content='memories', content_rowid='id');
+
   CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts (rowid, text, tags) VALUES (new.id, new.text, new.tags);
+    INSERT INTO memories_fts (rowid, text, tags)
+      VALUES (new.id, new.text, new.tags);
   END;
+
   CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-    INSERT INTO memories_fts (memories_fts, rowid, text, tags) VALUES ('delete', old.id, old.text, old.tags);
-  END;
-  CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-    INSERT INTO memories_fts (memories_fts, rowid, text, tags) VALUES ('delete', old.id, old.text, old.tags);
-    INSERT INTO memories_fts (rowid, text, tags) VALUES (new.id, new.text, new.tags);
+    INSERT INTO memories_fts (memories_fts, rowid, text, tags)
+      VALUES ('delete', old.id, old.text, old.tags);
   END;
 `
 
-/**
- * Normalize a tag list to the lowercase, deduplicated, space-joined form the
- * FTS index stores, so `Foo`, `foo`, and a repeated `foo` all match `foo`.
- * @param tags - tags as supplied by the model or config.
- * @returns the normalized space-joined list, empty when nothing survives.
- */
+const UPDATE_TRIGGER = `
+  DROP TRIGGER IF EXISTS memories_au;
+  CREATE TRIGGER memories_au AFTER UPDATE OF text, tags ON memories BEGIN
+    INSERT INTO memories_fts (memories_fts, rowid, text, tags)
+      VALUES ('delete', old.id, old.text, old.tags);
+    INSERT INTO memories_fts (rowid, text, tags)
+      VALUES (new.id, new.text, new.tags);
+  END;
+`
+
 export function normalizeTags(tags: readonly string[]): string {
   const seen = new Set<string>()
   for (const tag of tags) {
@@ -102,11 +124,24 @@ export function normalizeMemoryText(text: string): string {
     .replace(/\s+/g, ' ')
 }
 
-/** Token-set Jaccard similarity in the [0, 1] interval. */
+/**
+ * Scope normalization is intentionally predictable and filesystem-independent.
+ * Names remain human-readable while whitespace/case differences collapse.
+ */
+export function normalizeScope(scope: string): string {
+  return scope
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+}
+
+/** Token-set Jaccard similarity in [0, 1]. */
 export function lexicalSimilarity(left: string, right: string): number {
   const a = new Set(normalizeMemoryText(left).split(' ').filter(Boolean))
   const b = new Set(normalizeMemoryText(right).split(' ').filter(Boolean))
   if (a.size === 0 || b.size === 0) return 0
+
   let intersection = 0
   for (const token of a) if (b.has(token)) intersection++
   const union = a.size + b.size - intersection
@@ -114,12 +149,27 @@ export function lexicalSimilarity(left: string, right: string): number {
 }
 
 /**
- * Compile a free-text query into an FTS5 MATCH expression. Every token is
- * quoted, so FTS5 operators a model happens to type (`OR`, `*`, `-`, `"`) are
- * matched literally instead of changing the query's meaning or raising a
- * syntax error mid-tool-call.
- * @param query - the raw query text.
- * @returns the MATCH expression, or undefined when the query has no usable token.
+ * Deterministic recall score.
+ *
+ * Importance is deliberately dominant. Explicit retrieval adds a small,
+ * logarithmic bonus. Recency contributes a decaying bonus with a configurable
+ * half-life instead of permanently punishing old but still-important facts.
+ */
+export function memoryPriority(
+  record: MemoryRecord,
+  decayHalfLifeDays: number,
+  now = Date.now(),
+): number {
+  const lastUseful = Math.max(record.updatedAt, record.lastAccessed ?? 0)
+  const ageDays = Math.max(0, now - lastUseful) / DAY_MS
+  const recency = 10 * Math.pow(0.5, ageDays / decayHalfLifeDays)
+  const usage = 4 * Math.log2(record.accessCount + 1)
+  return record.importance * 10 + usage + recency
+}
+
+/**
+ * Compile free text to literal FTS5 tokens. FTS operators typed by the model
+ * never become executable query syntax.
  */
 export function compileMatch(query: string): string | undefined {
   const tokens = query
@@ -129,64 +179,141 @@ export function compileMatch(query: string): string | undefined {
   return tokens.length > 0 ? tokens.join(' ') : undefined
 }
 
-/** Map one row to the record shape, converting SQLite's integer boolean. */
 function toRecord(row: MemoryRow): MemoryRecord {
   return {
     id: row.id,
     text: row.text,
     tags: row.tags,
     pinned: row.pinned !== 0,
+    importance: row.importance,
+    scope: row.scope,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastAccessed: row.last_accessed,
+    accessCount: row.access_count,
   }
 }
 
-/**
- * The durable memory store. One instance owns one SQLite connection; `close()`
- * is idempotent and runs from the plugin's disposer.
- */
+function visibleScopes(scope: string): string[] {
+  return scope === 'global' ? ['global'] : ['global', scope]
+}
+
 export class MemoryStore {
   readonly #db: DatabaseSync
   #closed = false
 
-  /**
-   * Open (creating if absent) the store at `path`, applying the schema.
-   * @param path - database file path, or `:memory:` for an ephemeral store.
-   */
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
     this.#db = new DatabaseSync(path)
     this.#db.exec('PRAGMA journal_mode = WAL')
     this.#db.exec('PRAGMA foreign_keys = ON')
-    this.#db.exec(SCHEMA)
-    this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    this.#migrate()
   }
 
-  /**
-   * Store one memory.
-   * @param text - the fact to remember.
-   * @param tags - normalized tag list.
-   * @param pinned - whether it always renders in the prompt section.
-   * @returns the new record.
-   */
-  write(text: string, tags: string, pinned: boolean): MemoryRecord {
+  #migrate(): void {
+    const versionRow = this.#db.prepare('PRAGMA user_version').get() as unknown as { user_version: number }
+    let version = versionRow.user_version
+
+    // Defensive handling for an unversioned database that already has a table.
+    if (version === 0) {
+      const exists = this.#db.prepare(
+        "SELECT 1 AS yes FROM sqlite_master WHERE type = 'table' AND name = 'memories'",
+      ).get() as unknown as { yes: number } | undefined
+      if (exists) {
+        const columns = this.#db.prepare('PRAGMA table_info(memories)').all() as unknown as { name: string }[]
+        version = columns.some(column => column.name === 'importance') ? 2 : 1
+      }
+    }
+
+    if (version > SCHEMA_VERSION) {
+      throw new Error(
+        `memory: database schema v${version} is newer than supported v${SCHEMA_VERSION}`,
+      )
+    }
+
+    if (version === 0) {
+      this.#db.exec('BEGIN')
+      try {
+        this.#db.exec(CREATE_V2)
+        this.#db.exec(DERIVED_SCHEMA)
+        this.#db.exec(UPDATE_TRIGGER)
+        this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+        this.#db.exec('COMMIT')
+      } catch (error) {
+        this.#db.exec('ROLLBACK')
+        throw error
+      }
+      return
+    }
+
+    if (version === 1) {
+      this.#db.exec('BEGIN')
+      try {
+        this.#db.exec(`
+          ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 3;
+          ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'global';
+          ALTER TABLE memories ADD COLUMN last_accessed INTEGER;
+          ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
+        `)
+        this.#db.exec(DERIVED_SCHEMA)
+        this.#db.exec(UPDATE_TRIGGER)
+        this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+        this.#db.exec('COMMIT')
+      } catch (error) {
+        this.#db.exec('ROLLBACK')
+        throw error
+      }
+      return
+    }
+
+    // v2 may be reopened by a newer build that adds derived indexes/triggers.
+    this.#db.exec(CREATE_V2)
+    this.#db.exec(DERIVED_SCHEMA)
+    this.#db.exec(UPDATE_TRIGGER)
+  }
+
+  schemaVersion(): number {
+    const row = this.#db.prepare('PRAGMA user_version').get() as unknown as { user_version: number }
+    return row.user_version
+  }
+
+  write(
+    text: string,
+    tags: string,
+    pinned: boolean,
+    importance = 3,
+    scope = 'global',
+  ): MemoryRecord {
     const now = Date.now()
-    const statement = this.#db.prepare(
-      'INSERT INTO memories (text, tags, pinned, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING *')
-    return toRecord(statement.get(text, tags, pinned ? 1 : 0, now, now) as unknown as MemoryRow)
+    const statement = this.#db.prepare(`
+      INSERT INTO memories
+        (text, tags, pinned, importance, scope, created_at, updated_at, last_accessed, access_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0)
+      RETURNING *
+    `)
+    return toRecord(statement.get(
+      text,
+      tags,
+      pinned ? 1 : 0,
+      importance,
+      scope,
+      now,
+      now,
+    ) as unknown as MemoryRow)
   }
 
-  /** Fetch one memory by id. */
   get(id: number): MemoryRecord | undefined {
-    const row = this.#db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as unknown as MemoryRow | undefined
+    const row = this.#db.prepare('SELECT * FROM memories WHERE id = ?')
+      .get(id) as unknown as MemoryRow | undefined
     return row ? toRecord(row) : undefined
   }
 
-  /** Find an exact duplicate after deterministic normalization. */
-  findExact(text: string, excludeId?: number): MemoryRecord | undefined {
+  findExact(text: string, excludeId?: number, scope = 'global'): MemoryRecord | undefined {
     const wanted = normalizeMemoryText(text)
     if (wanted.length === 0) return undefined
-    const rows = this.#db.prepare('SELECT * FROM memories').all() as unknown as MemoryRow[]
+
+    const rows = this.#db.prepare('SELECT * FROM memories WHERE scope = ?')
+      .all(scope) as unknown as MemoryRow[]
     for (const row of rows) {
       if (excludeId !== undefined && row.id === excludeId) continue
       if (normalizeMemoryText(row.text) === wanted) return toRecord(row)
@@ -194,9 +321,16 @@ export class MemoryStore {
     return undefined
   }
 
-  /** Find lexically similar memories using local Jaccard similarity. */
-  findSimilar(text: string, threshold: number, limit: number, excludeId?: number): MemorySimilarity[] {
-    const rows = this.#db.prepare('SELECT * FROM memories').all() as unknown as MemoryRow[]
+  findSimilar(
+    text: string,
+    threshold: number,
+    limit: number,
+    excludeId?: number,
+    scope = 'global',
+  ): MemorySimilarity[] {
+    const rows = this.#db.prepare('SELECT * FROM memories WHERE scope = ?')
+      .all(scope) as unknown as MemoryRow[]
+
     return rows
       .filter(row => excludeId === undefined || row.id !== excludeId)
       .map(row => {
@@ -204,100 +338,207 @@ export class MemoryStore {
         return { record, similarity: lexicalSimilarity(text, record.text) }
       })
       .filter(candidate => candidate.similarity >= threshold)
-      .sort((a, b) => b.similarity - a.similarity || b.record.updatedAt - a.record.updatedAt || b.record.id - a.record.id)
+      .sort((a, b) =>
+        b.similarity - a.similarity
+        || b.record.importance - a.record.importance
+        || b.record.updatedAt - a.record.updatedAt
+        || b.record.id - a.record.id)
       .slice(0, limit)
   }
 
-  /** Update one memory in place so changed facts do not accumulate stale copies. */
-  update(id: number, patch: { text?: string; tags?: string; pinned?: boolean }): MemoryRecord | undefined {
+  update(
+    id: number,
+    patch: {
+      text?: string
+      tags?: string
+      pinned?: boolean
+      importance?: number
+      scope?: string
+    },
+  ): MemoryRecord | undefined {
     const current = this.get(id)
     if (!current) return undefined
-    const text = patch.text ?? current.text
-    const tags = patch.tags ?? current.tags
-    const pinned = patch.pinned ?? current.pinned
+
     const now = Date.now()
-    const row = this.#db.prepare(
-      'UPDATE memories SET text = ?, tags = ?, pinned = ?, updated_at = ? WHERE id = ? RETURNING *',
-    ).get(text, tags, pinned ? 1 : 0, now, id) as unknown as MemoryRow | undefined
+    const row = this.#db.prepare(`
+      UPDATE memories
+      SET text = ?, tags = ?, pinned = ?, importance = ?, scope = ?, updated_at = ?
+      WHERE id = ?
+      RETURNING *
+    `).get(
+      patch.text ?? current.text,
+      patch.tags ?? current.tags,
+      (patch.pinned ?? current.pinned) ? 1 : 0,
+      patch.importance ?? current.importance,
+      patch.scope ?? current.scope,
+      now,
+      id,
+    ) as unknown as MemoryRow | undefined
+
     return row ? toRecord(row) : undefined
   }
 
-  /** Read-only bounded review for likely duplicate pairs. */
-  review(threshold: number, scanLimit: number, resultLimit: number): MemoryReviewPair[] {
-    const rows = this.#db.prepare(
-      'SELECT * FROM memories ORDER BY updated_at DESC, id DESC LIMIT ?',
-    ).all(scanLimit) as unknown as MemoryRow[]
+  review(
+    threshold: number,
+    scanLimit: number,
+    resultLimit: number,
+    scope = '*',
+  ): MemoryReviewPair[] {
+    const rows = scope === '*'
+      ? this.#db.prepare(
+          'SELECT * FROM memories ORDER BY updated_at DESC, id DESC LIMIT ?',
+        ).all(scanLimit) as unknown as MemoryRow[]
+      : this.#db.prepare(
+          'SELECT * FROM memories WHERE scope = ? ORDER BY updated_at DESC, id DESC LIMIT ?',
+        ).all(scope, scanLimit) as unknown as MemoryRow[]
+
     const records = rows.map(toRecord)
     const pairs: MemoryReviewPair[] = []
+
     for (let left = 0; left < records.length; left++) {
       const a = records[left]
       if (!a) continue
       for (let right = left + 1; right < records.length; right++) {
         const b = records[right]
-        if (!b) continue
+        if (!b || a.scope !== b.scope) continue
         const similarity = lexicalSimilarity(a.text, b.text)
         if (similarity >= threshold) pairs.push({ left: a, right: b, similarity })
       }
     }
+
     return pairs
-      .sort((a, b) => b.similarity - a.similarity)
+      .sort((a, b) =>
+        b.similarity - a.similarity
+        || b.left.importance - a.left.importance)
       .slice(0, resultLimit)
   }
 
-  /**
-   * Full-text search over memory text and tags, best match first.
-   * @param query - free-text query; FTS operators in it are matched literally.
-   * @param limit - maximum hits to return.
-   * @returns the ranked matches, empty when the query has no usable token.
-   */
-  search(query: string, limit: number): MemoryMatch[] {
+  search(query: string, limit: number, scope = '*'): MemoryMatch[] {
     const match = compileMatch(query)
     if (match === undefined) return []
-    const rows = this.#db.prepare(`
-      SELECT m.*, memories_fts.rank AS rank
-      FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-      WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?
-    `).all(match, limit) as unknown as MemoryRow[]
-    return rows.map(row => ({ ...toRecord(row), rank: row.rank ?? 0 }))
+
+    const rows = scope === '*'
+      ? this.#db.prepare(`
+          SELECT m.*, memories_fts.rank AS rank
+          FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+          WHERE memories_fts MATCH ?
+          ORDER BY rank
+          LIMIT ?
+        `).all(match, limit) as unknown as MemoryRow[]
+      : this.#db.prepare(`
+          SELECT m.*, memories_fts.rank AS rank
+          FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+          WHERE memories_fts MATCH ? AND m.scope = ?
+          ORDER BY rank
+          LIMIT ?
+        `).all(match, scope, limit) as unknown as MemoryRow[]
+
+    const now = Date.now()
+    const touch = this.#db.prepare(`
+      UPDATE memories
+      SET access_count = access_count + 1, last_accessed = ?
+      WHERE id = ?
+    `)
+    for (const row of rows) touch.run(now, row.id)
+
+    return rows.map(row => ({
+      ...toRecord({
+        ...row,
+        last_accessed: now,
+        access_count: row.access_count + 1,
+      }),
+      rank: row.rank ?? 0,
+    }))
   }
 
   /**
-   * The memories the prompt section renders: pinned first, then most recently
-   * updated, with no record repeated.
-   * @param recentCount - how many unpinned recent memories to include.
-   * @returns pinned records followed by recent ones.
+   * Pinned memories are always first. Non-pinned memories are ranked by
+   * importance + explicit retrieval frequency + decaying recency.
+   *
+   * A non-global prompt scope sees both global memories and its own scope.
    */
-  forPrompt(recentCount: number): MemoryRecord[] {
-    // `id DESC` breaks the tie: several memories written in the same
-    // millisecond share an `updated_at`, and without it their relative order
-    // is whatever the planner returns rather than newest-first.
-    const pinned = this.#db.prepare(
-      'SELECT * FROM memories WHERE pinned = 1 ORDER BY updated_at DESC, id DESC').all() as unknown as MemoryRow[]
-    const recent = this.#db.prepare(
-      'SELECT * FROM memories WHERE pinned = 0 ORDER BY updated_at DESC, id DESC LIMIT ?')
-      .all(recentCount) as unknown as MemoryRow[]
-    return [...pinned, ...recent].map(toRecord)
+  forPrompt(
+    recentCount: number,
+    scope = 'global',
+    decayHalfLifeDays = 45,
+    now = Date.now(),
+  ): MemoryRecord[] {
+    const scopes = visibleScopes(scope)
+    const placeholders = scopes.map(() => '?').join(', ')
+    const rows = this.#db.prepare(
+      `SELECT * FROM memories WHERE scope IN (${placeholders})`,
+    ).all(...scopes) as unknown as MemoryRow[]
+    const records = rows.map(toRecord)
+
+    const pinned = records
+      .filter(record => record.pinned)
+      .sort((a, b) =>
+        b.importance - a.importance
+        || b.updatedAt - a.updatedAt
+        || b.id - a.id)
+
+    const ranked = records
+      .filter(record => !record.pinned)
+      .sort((a, b) =>
+        memoryPriority(b, decayHalfLifeDays, now)
+        - memoryPriority(a, decayHalfLifeDays, now)
+        || b.updatedAt - a.updatedAt
+        || b.id - a.id)
+      .slice(0, recentCount)
+
+    return [...pinned, ...ranked]
   }
 
   /**
-   * Delete one memory.
-   * @param id - the record id.
-   * @returns whether a record was deleted.
+   * Read-only stale-memory candidates. Importance 5 and pinned memories are
+   * protected; this method never deletes anything automatically.
    */
+  staleCandidates(
+    staleAfterDays: number,
+    limit: number,
+    scope = '*',
+    now = Date.now(),
+  ): MemoryRecord[] {
+    const cutoff = now - staleAfterDays * DAY_MS
+    const base = `
+      pinned = 0
+      AND importance < 5
+      AND MAX(updated_at, COALESCE(last_accessed, 0)) < ?
+    `
+
+    const rows = scope === '*'
+      ? this.#db.prepare(`
+          SELECT * FROM memories
+          WHERE ${base}
+          ORDER BY importance ASC,
+                   MAX(updated_at, COALESCE(last_accessed, 0)) ASC,
+                   access_count ASC
+          LIMIT ?
+        `).all(cutoff, limit) as unknown as MemoryRow[]
+      : this.#db.prepare(`
+          SELECT * FROM memories
+          WHERE scope = ? AND ${base}
+          ORDER BY importance ASC,
+                   MAX(updated_at, COALESCE(last_accessed, 0)) ASC,
+                   access_count ASC
+          LIMIT ?
+        `).all(scope, cutoff, limit) as unknown as MemoryRow[]
+
+    return rows.map(toRecord)
+  }
+
   forget(id: number): boolean {
     return this.#db.prepare('DELETE FROM memories WHERE id = ?').run(id).changes > 0
   }
 
-  /**
-   * Total stored memories.
-   * @returns the row count.
-   */
-  count(): number {
-    const row = this.#db.prepare('SELECT COUNT(*) AS n FROM memories').get() as unknown as { n: number }
+  count(scope = '*'): number {
+    const row = scope === '*'
+      ? this.#db.prepare('SELECT COUNT(*) AS n FROM memories').get() as unknown as { n: number }
+      : this.#db.prepare('SELECT COUNT(*) AS n FROM memories WHERE scope = ?')
+          .get(scope) as unknown as { n: number }
     return row.n
   }
 
-  /** Close the connection; idempotent, so plugin disposal and tests may both call it. */
   close(): void {
     if (this.#closed) return
     this.#closed = true
