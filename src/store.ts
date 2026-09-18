@@ -83,8 +83,10 @@ const CREATE_LATEST = `
 const DERIVED_SCHEMA = `
   CREATE INDEX IF NOT EXISTS memories_recent
     ON memories (updated_at DESC, id DESC);
-  CREATE INDEX IF NOT EXISTS memories_scope_priority
+  CREATE INDEX IF NOT EXISTS memories_active_scope_priority
     ON memories (archived, scope, pinned DESC, importance DESC, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS memories_archive
+    ON memories (archived, archived_at DESC);
   CREATE INDEX IF NOT EXISTS memories_access
     ON memories (last_accessed DESC, access_count DESC);
 
