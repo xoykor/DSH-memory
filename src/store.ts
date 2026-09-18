@@ -10,7 +10,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 const DAY_MS = 86_400_000
 
 export interface MemoryRecord {
@@ -26,6 +26,9 @@ export interface MemoryRecord {
   updatedAt: number
   lastAccessed: number | null
   accessCount: number
+  /** Archived memories stay durable but leave normal recall/search/dedup. */
+  archived: boolean
+  archivedAt: number | null
 }
 
 export interface MemoryMatch extends MemoryRecord {
@@ -55,10 +58,12 @@ interface MemoryRow {
   updated_at: number
   last_accessed: number | null
   access_count: number
+  archived: number
+  archived_at: number | null
   rank?: number
 }
 
-const CREATE_V2 = `
+const CREATE_LATEST = `
   CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT NOT NULL,
@@ -69,7 +74,9 @@ const CREATE_V2 = `
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     last_accessed INTEGER,
-    access_count INTEGER NOT NULL DEFAULT 0
+    access_count INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER
   );
 `
 
@@ -77,7 +84,7 @@ const DERIVED_SCHEMA = `
   CREATE INDEX IF NOT EXISTS memories_recent
     ON memories (updated_at DESC, id DESC);
   CREATE INDEX IF NOT EXISTS memories_scope_priority
-    ON memories (scope, pinned DESC, importance DESC, updated_at DESC);
+    ON memories (archived, scope, pinned DESC, importance DESC, updated_at DESC);
   CREATE INDEX IF NOT EXISTS memories_access
     ON memories (last_accessed DESC, access_count DESC);
 
@@ -191,6 +198,8 @@ function toRecord(row: MemoryRow): MemoryRecord {
     updatedAt: row.updated_at,
     lastAccessed: row.last_accessed,
     accessCount: row.access_count,
+    archived: row.archived !== 0,
+    archivedAt: row.archived_at,
   }
 }
 
@@ -221,7 +230,9 @@ export class MemoryStore {
       ).get() as unknown as { yes: number } | undefined
       if (exists) {
         const columns = this.#db.prepare('PRAGMA table_info(memories)').all() as unknown as { name: string }[]
-        version = columns.some(column => column.name === 'importance') ? 2 : 1
+        if (columns.some(column => column.name === 'archived')) version = 3
+        else if (columns.some(column => column.name === 'importance')) version = 2
+        else version = 1
       }
     }
 
@@ -234,7 +245,7 @@ export class MemoryStore {
     if (version === 0) {
       this.#db.exec('BEGIN')
       try {
-        this.#db.exec(CREATE_V2)
+        this.#db.exec(CREATE_LATEST)
         this.#db.exec(DERIVED_SCHEMA)
         this.#db.exec(UPDATE_TRIGGER)
         // Rebuild makes migration robust even if the old derived FTS index was
@@ -257,6 +268,8 @@ export class MemoryStore {
           ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'global';
           ALTER TABLE memories ADD COLUMN last_accessed INTEGER;
           ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE memories ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE memories ADD COLUMN archived_at INTEGER;
         `)
         this.#db.exec(DERIVED_SCHEMA)
         this.#db.exec(UPDATE_TRIGGER)
@@ -269,8 +282,26 @@ export class MemoryStore {
       return
     }
 
-    // v2 may be reopened by a newer build that adds derived indexes/triggers.
-    this.#db.exec(CREATE_V2)
+    if (version === 2) {
+      this.#db.exec('BEGIN')
+      try {
+        this.#db.exec(`
+          ALTER TABLE memories ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE memories ADD COLUMN archived_at INTEGER;
+        `)
+        this.#db.exec(DERIVED_SCHEMA)
+        this.#db.exec(UPDATE_TRIGGER)
+        this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+        this.#db.exec('COMMIT')
+      } catch (error) {
+        this.#db.exec('ROLLBACK')
+        throw error
+      }
+      return
+    }
+
+    // Current databases may be reopened by builds that add derived indexes/triggers.
+    this.#db.exec(CREATE_LATEST)
     this.#db.exec(DERIVED_SCHEMA)
     this.#db.exec(UPDATE_TRIGGER)
   }
@@ -290,8 +321,9 @@ export class MemoryStore {
     const now = Date.now()
     const statement = this.#db.prepare(`
       INSERT INTO memories
-        (text, tags, pinned, importance, scope, created_at, updated_at, last_accessed, access_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0)
+        (text, tags, pinned, importance, scope, created_at, updated_at,
+         last_accessed, access_count, archived, archived_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, NULL)
       RETURNING *
     `)
     return toRecord(statement.get(
@@ -315,7 +347,7 @@ export class MemoryStore {
     const wanted = normalizeMemoryText(text)
     if (wanted.length === 0) return undefined
 
-    const rows = this.#db.prepare('SELECT * FROM memories WHERE scope = ?')
+    const rows = this.#db.prepare('SELECT * FROM memories WHERE scope = ? AND archived = 0')
       .all(scope) as unknown as MemoryRow[]
     for (const row of rows) {
       if (excludeId !== undefined && row.id === excludeId) continue
@@ -331,7 +363,7 @@ export class MemoryStore {
     excludeId?: number,
     scope = 'global',
   ): MemorySimilarity[] {
-    const rows = this.#db.prepare('SELECT * FROM memories WHERE scope = ?')
+    const rows = this.#db.prepare('SELECT * FROM memories WHERE scope = ? AND archived = 0')
       .all(scope) as unknown as MemoryRow[]
 
     return rows
@@ -357,15 +389,21 @@ export class MemoryStore {
       pinned?: boolean
       importance?: number
       scope?: string
+      archived?: boolean
     },
   ): MemoryRecord | undefined {
     const current = this.get(id)
     if (!current) return undefined
 
     const now = Date.now()
+    const archived = patch.archived ?? current.archived
+    const archivedAt = archived
+      ? (current.archived ? current.archivedAt ?? now : now)
+      : null
     const row = this.#db.prepare(`
       UPDATE memories
-      SET text = ?, tags = ?, pinned = ?, importance = ?, scope = ?, updated_at = ?
+      SET text = ?, tags = ?, pinned = ?, importance = ?, scope = ?,
+          archived = ?, archived_at = ?, updated_at = ?
       WHERE id = ?
       RETURNING *
     `).get(
@@ -374,6 +412,8 @@ export class MemoryStore {
       (patch.pinned ?? current.pinned) ? 1 : 0,
       patch.importance ?? current.importance,
       patch.scope ?? current.scope,
+      archived ? 1 : 0,
+      archivedAt,
       now,
       id,
     ) as unknown as MemoryRow | undefined
@@ -389,10 +429,10 @@ export class MemoryStore {
   ): MemoryReviewPair[] {
     const rows = scope === '*'
       ? this.#db.prepare(
-          'SELECT * FROM memories ORDER BY updated_at DESC, id DESC LIMIT ?',
+          'SELECT * FROM memories WHERE archived = 0 ORDER BY updated_at DESC, id DESC LIMIT ?',
         ).all(scanLimit) as unknown as MemoryRow[]
       : this.#db.prepare(
-          'SELECT * FROM memories WHERE scope = ? ORDER BY updated_at DESC, id DESC LIMIT ?',
+          'SELECT * FROM memories WHERE scope = ? AND archived = 0 ORDER BY updated_at DESC, id DESC LIMIT ?',
         ).all(scope, scanLimit) as unknown as MemoryRow[]
 
     const records = rows.map(toRecord)
@@ -416,22 +456,23 @@ export class MemoryStore {
       .slice(0, resultLimit)
   }
 
-  search(query: string, limit: number, scope = '*'): MemoryMatch[] {
+  search(query: string, limit: number, scope = '*', includeArchived = false): MemoryMatch[] {
     const match = compileMatch(query)
     if (match === undefined) return []
 
+    const archivedClause = includeArchived ? '' : ' AND m.archived = 0'
     const rows = scope === '*'
       ? this.#db.prepare(`
           SELECT m.*, memories_fts.rank AS rank
           FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-          WHERE memories_fts MATCH ?
+          WHERE memories_fts MATCH ?${archivedClause}
           ORDER BY rank
           LIMIT ?
         `).all(match, limit) as unknown as MemoryRow[]
       : this.#db.prepare(`
           SELECT m.*, memories_fts.rank AS rank
           FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-          WHERE memories_fts MATCH ? AND m.scope = ?
+          WHERE memories_fts MATCH ? AND m.scope = ?${archivedClause}
           ORDER BY rank
           LIMIT ?
         `).all(match, scope, limit) as unknown as MemoryRow[]
@@ -469,7 +510,7 @@ export class MemoryStore {
     const scopes = visibleScopes(scope)
     const placeholders = scopes.map(() => '?').join(', ')
     const rows = this.#db.prepare(
-      `SELECT * FROM memories WHERE scope IN (${placeholders})`,
+      `SELECT * FROM memories WHERE archived = 0 AND scope IN (${placeholders})`,
     ).all(...scopes) as unknown as MemoryRow[]
     const records = rows.map(toRecord)
 
@@ -504,7 +545,8 @@ export class MemoryStore {
   ): MemoryRecord[] {
     const cutoff = now - staleAfterDays * DAY_MS
     const base = `
-      pinned = 0
+      archived = 0
+      AND pinned = 0
       AND importance < 5
       AND MAX(updated_at, COALESCE(last_accessed, 0)) < ?
     `
@@ -534,11 +576,23 @@ export class MemoryStore {
     return this.#db.prepare('DELETE FROM memories WHERE id = ?').run(id).changes > 0
   }
 
-  count(scope = '*'): number {
+  archive(id: number): MemoryRecord | undefined {
+    return this.update(id, { archived: true })
+  }
+
+  restore(id: number): MemoryRecord | undefined {
+    return this.update(id, { archived: false })
+  }
+
+  count(scope = '*', includeArchived = true): number {
+    const archived = includeArchived ? '' : ' AND archived = 0'
     const row = scope === '*'
-      ? this.#db.prepare('SELECT COUNT(*) AS n FROM memories').get() as unknown as { n: number }
-      : this.#db.prepare('SELECT COUNT(*) AS n FROM memories WHERE scope = ?')
-          .get(scope) as unknown as { n: number }
+      ? this.#db.prepare(
+          `SELECT COUNT(*) AS n FROM memories WHERE 1 = 1${archived}`,
+        ).get() as unknown as { n: number }
+      : this.#db.prepare(
+          `SELECT COUNT(*) AS n FROM memories WHERE scope = ?${archived}`,
+        ).get(scope) as unknown as { n: number }
     return row.n
   }
 
