@@ -1,0 +1,12 @@
+node_modules/
+lib/
+coverage/
+*.tgz
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+*.db
+*.db-shm
+*.db-wal
