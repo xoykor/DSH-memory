@@ -90,6 +90,10 @@ const SEARCH_DESCRIPTION =
   'Search stored memories by keyword. Search results count as explicit accesses and therefore receive '
   + 'a small future recall bonus. Omit scope to search all scopes.'
 
+const STATS_DESCRIPTION =
+  'Inspect memory health without changing retrieval counters: active/archive counts, pinned/keyed totals, '
+  + 'stale candidates, scopes, and active memories by importance.'
+
 const FORGET_DESCRIPTION =
   'Delete one stored memory by id when the fact is wrong, obsolete, or intentionally discarded.'
 
@@ -674,6 +678,73 @@ export function apply(ctx: Context, config: Config): void {
           archived: record.archived,
         })),
       }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'memory_stats',
+    description: STATS_DESCRIPTION,
+    parameters: {
+      scope: {
+        type: 'string',
+        description: 'Optional exact scope. Omit for an all-scope summary.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          total: { type: 'integer', required: true },
+          active: { type: 'integer', required: true },
+          archived: { type: 'integer', required: true },
+          pinned: { type: 'integer', required: true },
+          keyed: { type: 'integer', required: true },
+          stale: { type: 'integer', required: true },
+          scopes: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                scope: { type: 'string', required: true },
+                active: { type: 'integer', required: true },
+                archived: { type: 'integer', required: true },
+              },
+            },
+          },
+          importance: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                importance: { type: 'integer', required: true },
+                active: { type: 'integer', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: `Memory health: ${value.active} active, ${value.archived} archived, `
+          + `${value.pinned} pinned, ${value.keyed} keyed, ${value.stale} stale candidate(s).`,
+      }],
+    },
+    presentCall: args => ({
+      card: 'generic',
+      title: 'memory_stats',
+      kind: 'search',
+      rawInput: args,
+    }),
+    async execute(args) {
+      const scope = args.scope === undefined
+        ? '*'
+        : validateScope(args.scope, 'memory_stats')
+      return open().stats(config.staleAfterDays, scope)
     },
   }))
 
