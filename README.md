@@ -6,73 +6,68 @@ This fork keeps the lightweight architecture of [ben7am1n/dsh-memory](https://gi
 
 ## Curation model
 
-Curation is deterministic and local:
+The plugin uses deterministic curation in three layers:
 
-1. **Write-time**
-   - normalized exact deduplication;
+1. **Write-time curation**
+   - Unicode/case/punctuation normalization;
+   - exact deduplication;
    - high-confidence token-set Jaccard deduplication;
-   - metadata merge;
-   - optional canonical keys;
-   - scope isolation.
+   - metadata merge for tags, pinning and importance;
+   - deduplication is isolated by scope.
 
-2. **Recall-time**
-   - importance 1–5;
+2. **Recall-time curation**
+   - importance from 1 to 5;
    - explicit access count;
    - last-access timestamp;
    - decaying recency bonus;
    - global/project/workspace scopes;
    - deterministic prompt ranking.
 
-3. **Lifecycle**
-   - stale candidates;
-   - archive/restore without data loss;
-   - archived memories leave active recall/search/dedup;
-   - permanent deletion remains explicit.
+3. **Lifecycle curation**
+   - stale-memory candidates;
+   - non-destructive archive/restore;
+   - archived memories leave normal recall/search/dedup;
+   - explicit historical search can still retrieve them;
+   - permanent deletion remains a separate explicit action.
 
-4. **Conflict control**
-   - an optional canonical key can identify one durable fact;
-   - active keys are unique per scope;
-   - conflicting writes are reported rather than silently overwriting memory;
-   - changes to keyed facts require explicit `memory_update`.
+No background LLM is used for any of these operations.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `memory_write` | Store a durable fact, deduplicate it, or report a canonical-key conflict |
-| `memory_update` | Correct text/metadata/key/scope or archive/restore in place |
-| `memory_search` | FTS5 retrieval across all scopes or one exact scope; archive history is optional |
+| `memory_write` | Store a durable fact and suppress high-confidence duplicates inside the same scope |
+| `memory_update` | Correct text/metadata, move scope, archive, or restore a memory |
+| `memory_search` | FTS5 retrieval across all scopes or one exact scope; can optionally include archive history |
 | `memory_review` | Find likely duplicate pairs and stale candidates |
 | `memory_forget` | Permanently delete an obsolete memory |
 
-## Schema v4
+## Schema v3
 
-The current record includes:
+Schema v3 stores:
 
 | Field | Purpose |
 |---|---|
 | `text` | Self-contained durable fact |
-| `tags` | Searchable labels |
+| `tags` | FTS-searchable labels |
 | `pinned` | Always prioritize in visible recall |
-| `importance` | 1–5 durability/relevance |
-| `scope` | Isolation key |
-| `memory_key` | Optional canonical fact identity |
+| `importance` | 1–5 durability/relevance weight |
+| `scope` | Memory isolation key |
 | `created_at` | Creation timestamp |
 | `updated_at` | Last content/metadata change |
 | `last_accessed` | Last explicit search retrieval |
-| `access_count` | Explicit retrieval count |
-| `archived` | Removes memory from active use without deleting |
+| `access_count` | Number of explicit search retrievals |
+| `archived` | Removes memory from normal active use without deleting |
 | `archived_at` | Archive timestamp |
 
-Automatic migrations are supported:
+Existing databases migrate automatically:
 
 ```text
-v1 -> v4
-v2 -> v4
-v3 -> v4
+v1 -> v3
+v2 -> v3
 ```
 
-FTS5 is rebuilt during migration, so derived search state is repaired as part of the upgrade.
+Ids, text, tags, timestamps and pinned state are preserved. v1 data receives safe defaults for new metadata.
 
 ## Recall ranking
 
@@ -89,7 +84,9 @@ score =
 
 The recency bonus starts at 10 and halves every `decayHalfLifeDays`.
 
-Decay only reduces the recency bonus. It never deletes knowledge.
+This makes importance dominant while letting frequently retrieved and recently useful facts move upward naturally.
+
+Importantly, decay affects the **recency bonus** rather than deleting or permanently penalizing old knowledge.
 
 ## Importance
 
@@ -100,14 +97,14 @@ Recommended meaning:
 2 = useful but replaceable
 3 = normal durable memory
 4 = important durable decision/preference
-5 = critical long-lived fact
+5 = critical/long-lived fact
 ```
 
-Pinned and importance-5 memories are protected from stale candidacy.
+Importance-5 memories are protected from stale candidacy.
 
 ## Scopes
 
-Recommended forms:
+Recommended scope forms:
 
 ```text
 global
@@ -116,76 +113,43 @@ project:dsh-memory
 workspace:university
 ```
 
-Deduplication and canonical-key uniqueness are scoped. A key may therefore exist once in `global` and independently once in `project:foo`.
+Write-time deduplication only compares active memories inside the same scope.
 
-When `promptScope` is non-global, automatic recall sees:
+When automatic recall uses a non-global scope, it sees:
 
 ```text
 global + active scope
 ```
 
-## Canonical keys
+Example:
 
-Keys are optional. They are useful when a fact has one clear identity that may change over time.
-
-Examples:
-
-```text
-environment.shell
-environment.os
-project.runtime
-project.package-manager
-user.editor
+```yaml
+promptScope: project:dsh-memory
 ```
 
-Example write:
-
-```text
-memory_write(
-  text = "The project runtime is Node 22",
-  scope = "project:example",
-  key = "project.runtime"
-)
-```
-
-If another write tries:
-
-```text
-key  = "project.runtime"
-text = "The project runtime is Node 24"
-```
-
-the plugin **does not overwrite Node 22** and does not create a second active keyed memory. It returns a conflict pointing to the existing memory.
-
-The model must then deliberately call:
-
-```text
-memory_update(existing_id, text = "The project runtime is Node 24")
-```
-
-This gives deterministic conflict detection without asking another LLM to decide which fact is true.
-
-Equivalent text using the same key is deduplicated normally.
+This recalls global preferences and DSH-memory project facts without mixing another project's memory.
 
 ## Archive vs delete
+
+Archiving is intentionally different from deletion.
 
 Archive:
 
 ```text
-memory_update(id, archived = true)
+memory_update(id, archived=true)
 ```
 
 An archived memory:
 
-- remains in SQLite;
-- keeps its id/key/metadata;
-- is excluded from active prompt recall;
+- stays in SQLite;
+- keeps its id and metadata;
+- is excluded from normal prompt recall;
 - is excluded from normal search;
-- is excluded from active deduplication and key uniqueness;
-- can be retrieved with `includeArchived=true`;
-- can be restored with `archived=false`.
+- is excluded from write-time deduplication;
+- can be found with `memory_search(..., includeArchived=true)`;
+- can be restored with `memory_update(id, archived=false)`.
 
-Restoration reruns active duplicate/key checks. If a newer active replacement exists, restoration is rejected.
+Restoration runs duplicate checks again. If a newer active replacement exists in the same scope, restoration is rejected instead of creating two active canonical copies.
 
 Permanent deletion remains:
 
@@ -197,9 +161,11 @@ memory_forget(id)
 
 `memory_review` reports stale candidates after `staleAfterDays`.
 
-It never archives or deletes automatically.
+It never deletes or archives them automatically.
 
-A safe lifecycle is:
+Pinned memories and importance-5 memories are protected from stale candidacy.
+
+A typical safe lifecycle is:
 
 ```text
 memory_review
@@ -207,8 +173,6 @@ memory_review
       +-- duplicate candidate -> memory_update / memory_forget
       |
       +-- stale candidate ----> memory_update(archived=true)
-      |
-      +-- changed keyed fact -> memory_update(existing_id, ...)
 ```
 
 ## Configuration
@@ -238,17 +202,16 @@ memory_review
 
 ## Why no second model?
 
-All curation uses:
+All curation uses only:
 
 - SQLite;
 - FTS5;
 - Unicode normalization;
 - token-set Jaccard similarity;
-- timestamps/counters;
-- unique partial indexes;
+- timestamps and counters;
 - deterministic ranking and lifecycle rules.
 
-The model already running in DSH decides what deserves memory and when to use the tools. No second LLM or embedding model needs to stay in RAM/VRAM.
+The model already running in DSH decides what deserves memory and when to call the tools. Nothing else needs to stay loaded in RAM/VRAM.
 
 ## Development
 
