@@ -2,6 +2,15 @@
 
 All notable changes to this fork are documented here.
 
+## 0.7.1
+
+- Fixed bundle loading in profiles that set `autoInstallPeers: false`.
+- Removed the runtime import of `@deepseek-ai/dsh-tools`; memory tools now register through DSH's supported raw JSON-Schema ToolDefinition interface.
+- The distributed package is now self-contained apart from its normal `@deepseek-ai/schemastery` dependency.
+- Development compatibility is pinned to the DSH `0.1.5-rc.2` API used by the target backup profile.
+- Added a standalone compatibility check that installs the packed bundle without DSH peer packages and verifies import plus bundle composition against DSH `0.1.5-rc.2`.
+- Database schema remains v4; no migration is required.
+
 ## 0.7.0
 
 - Added configurable `memoryPolicy`: `minimal`, `guided`, and `strict`.
