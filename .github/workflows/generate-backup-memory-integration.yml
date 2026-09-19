@@ -25,6 +25,17 @@ jobs:
       - name: Install pinned pnpm
         run: npm install -g pnpm@11.26.0
 
+      - name: Configure robust-local peer policy
+        working-directory: backup/dsh/profiles/robust-local
+        run: |
+          cat > pnpm-workspace.yaml <<'EOF'
+          packages:
+            - .
+
+          nodeLinker: hoisted
+          autoInstallPeers: false
+          EOF
+
       - name: Install DSH-memory v0.7.0
         working-directory: backup/dsh/profiles/robust-local
         run: |
@@ -53,5 +64,8 @@ jobs:
           echo
           echo '===PNPM_LOCK_BASE64==='
           base64 -w0 pnpm-lock.yaml
+          echo
+          echo '===PNPM_WORKSPACE_BASE64==='
+          base64 -w0 pnpm-workspace.yaml
           echo
           echo '===END_GENERATED_FILES==='
