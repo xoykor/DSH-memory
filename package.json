@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory",
-  "version": "0.7.0",
-  "description": "Curated durable memory for DeepSeek Harness: automatic recall, guided usage policy, SQLite FTS5, ranking/scopes/archive/canonical keys, no second model",
+  "version": "0.7.1",
+  "description": "Curated durable memory for DeepSeek Harness: automatic recall, guided usage policy, self-contained tool registration, SQLite FTS5, no second model",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -42,17 +42,17 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.2"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-system-prompt": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
     "@types/node": "^26.2.0",
     "tsdown": "^0.15.6",
     "typescript": "^5.9.3",
