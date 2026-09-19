@@ -1,0 +1,55 @@
+name: Generate web memory integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/generate-web-memory.yml
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xoykor/DSH-Backup
+          ref: master
+          path: backup
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install pnpm
+        run: npm install -g pnpm@11.26.0
+
+      - name: Add dsh-memory to web profile
+        working-directory: backup/dsh/profiles/web
+        run: |
+          pnpm add https://github.com/xoykor/DSH-memory/releases/download/v0.7.1/dsh-memory-0.7.1.tgz
+
+          node <<'NODE'
+          const fs = require('node:fs')
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+          const bundles = pkg.dsh?.profile?.bundles
+          if (!Array.isArray(bundles)) throw new Error('dsh.profile.bundles missing')
+          if (!bundles.includes('dsh-memory')) bundles.push('dsh-memory')
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n')
+          NODE
+
+          pnpm install --frozen-lockfile
+          test -f node_modules/dsh-memory/lib/index.js
+          node -e "const p=require('./node_modules/dsh-memory/package.json'); if(p.version!=='0.7.1') process.exit(1)"
+          node -e "import('dsh-memory').then(()=>console.log('IMPORT_OK'))"
+
+      - name: Emit generated files
+        working-directory: backup/dsh/profiles/web
+        run: |
+          echo '===PACKAGE_JSON_BASE64==='
+          base64 -w0 package.json
+          echo
+          echo '===PNPM_LOCK_BASE64==='
+          base64 -w0 pnpm-lock.yaml
+          echo
+          echo '===END_GENERATED_FILES==='
