@@ -18,6 +18,7 @@
         searchLimitDefault: 10
         searchLimitMax: 50
         promptOrder: 50
+        memoryPolicy: guided
         dedupSimilarityThreshold: 0.90
         reviewSimilarityThreshold: 0.65
         reviewScanLimit: 1000

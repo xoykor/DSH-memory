@@ -2,6 +2,17 @@
 
 All notable changes to this fork are documented here.
 
+## 0.7.0
+
+- Added configurable `memoryPolicy`: `minimal`, `guided`, and `strict`.
+- `guided` is now the default bundle policy.
+- The policy is injected into the system prompt independently of recall, so the model is reminded how to use memory even when the database is empty.
+- Guided mode tells the active model when to use `memory_search`, `memory_write`, and `memory_update`, while explicitly discouraging unnecessary calls.
+- Strict mode adds stronger task-boundary checks and canonical-key guidance.
+- Minimal mode preserves recall-only behavior with no extra memory-tool instructions.
+- Added policy prompt regression tests, including rejection of unknown policy names.
+- No schema migration is required; the database remains schema v4.
+
 ## 0.6.0
 
 - Added `memory_stats`, a read-only memory-health summary.

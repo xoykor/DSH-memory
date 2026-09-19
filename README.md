@@ -35,6 +35,30 @@ Curation is deterministic and local:
    - conflicting writes are reported instead of silently overwriting memory;
    - changes to keyed facts require explicit `memory_update`.
 
+## Memory usage policy
+
+Recall is already automatic: selected durable memories are injected into the system prompt every turn.
+
+The `memoryPolicy` setting controls how explicitly the active DSH model is instructed to use the memory tools:
+
+| Mode | Behavior |
+|---|---|
+| `minimal` | Inject memories only; no extra tool-usage instructions |
+| `guided` | **Default.** Short rules for when to search, write and update memory, plus an explicit warning not to overuse tools |
+| `strict` | Stronger task-boundary rules: check prior-session assumptions, persist durable facts before finishing, and prefer canonical keys |
+
+`guided` is the default because it gives small/local models a persistent reminder that memory exists without forcing a search or write on every task.
+
+The policy is inserted even when the database is empty, while the recall payload remains empty until memories exist. This means the agent is always reminded how to use memory, but context is not filled with fake or empty memories.
+
+Example:
+
+```yaml
+memoryPolicy: guided
+```
+
+For a model that already uses tools reliably, use `minimal`. For a model that often forgets memory tools, use `strict`.
+
 ## Tools
 
 | Tool | Purpose |
@@ -247,6 +271,7 @@ memory_review
     searchLimitDefault: 10
     searchLimitMax: 50
     promptOrder: 50
+    memoryPolicy: guided
 
     dedupSimilarityThreshold: 0.90
     reviewSimilarityThreshold: 0.65
