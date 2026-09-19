@@ -1,0 +1,87 @@
+name: Release v0.7.0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release-v0.7.0.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out validated release commit
+        uses: actions/checkout@v4
+        with:
+          ref: 17b37ccd867f487fed8f6a4fbdb89466bd19cb74
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack prebuilt DSH bundle
+        run: npm pack
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.7.0 >/dev/null 2>&1; then
+            echo "Release v0.7.0 already exists."
+            exit 0
+          fi
+
+          cat > release-notes.md <<'EOF'
+          ## DSH-memory v0.7.0
+
+          Curated durable memory for DeepSeek Harness, designed for local models without a second LLM or embedding service.
+
+          ### Highlights
+
+          - Automatic durable-memory recall in the system prompt.
+          - New `memoryPolicy` modes: `minimal`, `guided`, and `strict`.
+          - `guided` is the default and reminds the agent when to use `memory_search`, `memory_write`, and `memory_update` without forcing unnecessary calls.
+          - SQLite + FTS5 storage with deterministic ranking.
+          - Importance, access frequency, recency decay, and scoped memories.
+          - Canonical keys with deterministic conflict detection.
+          - Non-destructive archive/restore lifecycle.
+          - Duplicate and stale-memory review.
+          - Read-only `memory_stats` diagnostics.
+          - Automatic migration from schema v1, v2, and v3 to schema v4.
+          - No second model, embeddings, API key, or sidecar process.
+
+          ### Compatibility
+
+          - Node.js 22.19+ or 24+
+          - DeepSeek Harness bundle/plugin system
+          - Validated by CI with typecheck, tests, and build on Node 22.19 and Node 24.
+
+          ### Installation
+
+          The attached `dsh-memory-0.7.0.tgz` is a prebuilt bundle containing `lib/` and `cordis.patch.yml`.
+
+          You can also install directly from the GitHub repository, but Git-hosted installs may require pnpm build-script permission for the package's `prepare` step.
+          EOF
+
+          gh release create v0.7.0 ./*.tgz \
+            --repo "${{ github.repository }}" \
+            --target "17b37ccd867f487fed8f6a4fbdb89466bd19cb74" \
+            --title "DSH-memory v0.7.0" \
+            --notes-file release-notes.md
