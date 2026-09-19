@@ -54,6 +54,40 @@ describe('registration', () => {
   })
 })
 
+describe('memory policy prompt', () => {
+  it('uses guided policy by default even before any memory exists', async () => {
+    const ctx = await harness()
+
+    const assembled = await ctx.systemPrompt.assemble({})
+    const policy = assembled.sections.find(section => section.name === 'memory:policy')
+    expect(policy?.text).toContain('Use memory_search')
+    expect(policy?.text).toContain('Use memory_write')
+    expect(policy?.text).toContain('Use memory_update')
+    expect(policy?.text).toContain('Avoid memory tool calls')
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps minimal mode free of memory-usage instructions', async () => {
+    const ctx = await harness({ memoryPolicy: 'minimal' })
+
+    const assembled = await ctx.systemPrompt.assemble({})
+    const policy = assembled.sections.find(section => section.name === 'memory:policy')
+    expect(policy?.text ?? '').toBe('')
+    await ctx.fiber.dispose()
+  })
+
+  it('makes strict mode explicitly check prior-session assumptions and durable writes', async () => {
+    const ctx = await harness({ memoryPolicy: 'strict' })
+
+    const assembled = await ctx.systemPrompt.assemble({})
+    const policy = assembled.sections.find(section => section.name === 'memory:policy')
+    expect(policy?.text).toContain('Before relying on an assumption')
+    expect(policy?.text).toContain('Before finishing a task')
+    expect(policy?.text).toContain('canonical key')
+    await ctx.fiber.dispose()
+  })
+})
+
 describe('write and recall round trip', () => {
   it('renders a written memory into the prompt section', async () => {
     const ctx = await harness()
@@ -83,7 +117,7 @@ describe('write and recall round trip', () => {
     await ctx.fiber.dispose()
   })
 
-  it('contributes nothing when no memory is stored', async () => {
+  it('contributes no recall payload when no memory is stored', async () => {
     const ctx = await harness()
 
     const assembled = await ctx.systemPrompt.assemble({})
@@ -129,6 +163,10 @@ describe('fail-loud config', () => {
   it('rejects a default search limit above the cap', async () => {
     await expect(harness({ searchLimitDefault: 100, searchLimitMax: 10 }))
       .rejects.toThrow('exceeds searchLimitMax')
+  })
+
+  it('rejects an unknown memory policy', async () => {
+    await expect(harness({ memoryPolicy: 'aggressive' as never })).rejects.toThrow()
   })
 
   it('rejects a non-positive bound', async () => {
