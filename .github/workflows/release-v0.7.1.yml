@@ -1,0 +1,82 @@
+name: Release v0.7.1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release-v0.7.1.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out validated release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ac1c6902e9d83e6bdf38185785919d996d5200a8
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Validate
+        run: |
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Ensure built runtime is self-contained
+        run: |
+          if grep -R "@deepseek-ai/dsh-tools" lib/; then
+            echo "Unexpected runtime import of @deepseek-ai/dsh-tools"
+            exit 1
+          fi
+
+      - name: Pack prebuilt DSH bundle
+        run: npm pack
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.7.1 >/dev/null 2>&1; then
+            echo "Release v0.7.1 already exists."
+            exit 0
+          fi
+
+          cat > release-notes.md <<'EOF'
+          ## DSH-memory v0.7.1
+
+          Compatibility fix for out-of-tree DSH profiles, including the robust-local profile used with DSH 0.1.5-rc.2.
+
+          ### Fixed
+
+          - Removed the runtime import of `@deepseek-ai/dsh-tools`.
+          - Memory tools now register through DSH's supported raw JSON-Schema ToolDefinition interface.
+          - The bundle loads when the profile uses `autoInstallPeers: false`.
+          - The distributed package no longer requires DSH host packages to exist inside the profile's own `node_modules`.
+          - Development/tests are aligned with DSH `0.1.5-rc.2`.
+
+          ### Verified
+
+          - Typecheck, tests and build pass on Node 22.19 and Node 24.
+          - The packed plugin imports with `@deepseek-ai/dsh-tools` absent from the profile.
+          - Bundle composition was verified against DSH `0.1.5-rc.2` with peer auto-install disabled.
+          - Existing SQLite databases remain schema v4; no migration is required.
+
+          This fixes the v0.7.0 symptom where AGENTS.md mentioned `memory_write` but the memory tools did not appear in the model's declared function list.
+          EOF
+
+          gh release create v0.7.1 ./dsh-memory-0.7.1.tgz \
+            --repo "${{ github.repository }}" \
+            --target "ac1c6902e9d83e6bdf38185785919d996d5200a8" \
+            --title "DSH-memory v0.7.1" \
+            --notes-file release-notes.md
