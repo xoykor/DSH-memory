@@ -342,7 +342,7 @@ export function apply(ctx: Context, config: Config): void {
       rawInput: args,
     }),
     async execute(args) {
-      const text = args.text.trim()
+      const text = (args.text as string).trim()
       if (text.length === 0) throw new Error('memory_write: `text` must not be blank')
       if (text.length > config.maxTextChars) {
         throw new Error(
@@ -671,7 +671,7 @@ export function apply(ctx: Context, config: Config): void {
         type: 'text',
         text: value.matches.length === 0
           ? `No memories match ${JSON.stringify(args.query)}.`
-          : value.matches.map(match => {
+          : value.matches.map((match: { id: number; text: string; tags: string; pinned: boolean; importance: number; scope: string; key: string; accessCount: number; archived: boolean }) => {
               const tags = match.tags.length > 0 ? ` [${match.tags}]` : ''
               const archived = match.archived ? ', archived' : ''
               const key = match.key.length > 0 ? `, key=${match.key}` : ''
