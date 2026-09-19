@@ -1,27 +1,40 @@
-name: Reproduce DSH-memory rc2 loading
+name: Verify standalone DSH rc2 loading
 
 on:
   push:
     branches: [main]
     paths:
+      - src/**
+      - package.json
+      - cordis.patch.yml
       - .github/workflows/repro-rc2.yml
 
 jobs:
-  repro:
+  standalone:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - name: Install DSH rc2 and pnpm
+      - name: Build current dsh-memory
         run: |
-          mkdir runtime
-          cd runtime
+          npm install
+          npm run typecheck
+          npm run build
+          npm pack
+          mv dsh-memory-0.7.1.tgz /tmp/dsh-memory-0.7.1.tgz
+
+      - name: Install DSH rc2 runtime
+        run: |
+          mkdir /tmp/runtime
+          cd /tmp/runtime
           npm init -y >/dev/null
           npm install --no-fund --no-audit @deepseek-ai/dsh@0.1.5-rc.2 pnpm@11.26.0
 
-      - name: Create profile matching robust-local dependency policy
+      - name: Create profile with peer auto-install disabled
         run: |
           mkdir -p "$HOME/.dsh/profiles/test"
           cd "$HOME/.dsh/profiles/test"
@@ -30,7 +43,7 @@ jobs:
             "name": "dsh-profile-test",
             "private": true,
             "dependencies": {
-              "dsh-memory": "https://github.com/xoykor/DSH-memory/releases/download/v0.7.0/dsh-memory-0.7.0.tgz"
+              "dsh-memory": "file:/tmp/dsh-memory-0.7.1.tgz"
             },
             "dsh": {
               "profile": {
@@ -50,14 +63,16 @@ jobs:
           nodeLinker: hoisted
           autoInstallPeers: false
           EOF
-          "$GITHUB_WORKSPACE/runtime/node_modules/.bin/pnpm" install
+          /tmp/runtime/node_modules/.bin/pnpm install
 
-      - name: Direct import smoke
+      - name: Standalone import smoke
         working-directory: /home/runner/.dsh/profiles/test
         run: |
+          test ! -d node_modules/@deepseek-ai/dsh-tools
           node -e "import('dsh-memory').then(()=>console.log('IMPORT_OK'))"
 
-      - name: Dump composed config
+      - name: Verify bundle composition on DSH rc2
         run: |
-          "$GITHUB_WORKSPACE/runtime/node_modules/.bin/dsh" --profile test --dump-config | tee /tmp/config.txt
-          grep -n "memory" /tmp/config.txt
+          /tmp/runtime/node_modules/.bin/dsh --profile test --dump-config | tee /tmp/config.txt
+          grep -n "id: memory" /tmp/config.txt
+          grep -n "memoryPolicy: guided" /tmp/config.txt
