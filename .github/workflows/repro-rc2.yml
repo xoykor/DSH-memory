@@ -1,0 +1,63 @@
+name: Reproduce DSH-memory rc2 loading
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/repro-rc2.yml
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install DSH rc2 and pnpm
+        run: |
+          mkdir runtime
+          cd runtime
+          npm init -y >/dev/null
+          npm install --no-fund --no-audit @deepseek-ai/dsh@0.1.5-rc.2 pnpm@11.26.0
+
+      - name: Create profile matching robust-local dependency policy
+        run: |
+          mkdir -p "$HOME/.dsh/profiles/test"
+          cd "$HOME/.dsh/profiles/test"
+          cat > package.json <<'EOF'
+          {
+            "name": "dsh-profile-test",
+            "private": true,
+            "dependencies": {
+              "dsh-memory": "https://github.com/xoykor/DSH-memory/releases/download/v0.7.0/dsh-memory-0.7.0.tgz"
+            },
+            "dsh": {
+              "profile": {
+                "bundles": [
+                  "@deepseek-ai/dsh-base",
+                  "@deepseek-ai/dsh-web-app",
+                  "dsh-memory"
+                ],
+                "patchReload": "startup"
+              }
+            }
+          }
+          EOF
+          cat > pnpm-workspace.yaml <<'EOF'
+          packages:
+            - .
+          nodeLinker: hoisted
+          autoInstallPeers: false
+          EOF
+          "$GITHUB_WORKSPACE/runtime/node_modules/.bin/pnpm" install
+
+      - name: Direct import smoke
+        working-directory: /home/runner/.dsh/profiles/test
+        run: |
+          node -e "import('dsh-memory').then(()=>console.log('IMPORT_OK'))"
+
+      - name: Dump composed config
+        run: |
+          "$GITHUB_WORKSPACE/runtime/node_modules/.bin/dsh" --profile test --dump-config | tee /tmp/config.txt
+          grep -n "memory" /tmp/config.txt
