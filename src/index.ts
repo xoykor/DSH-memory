@@ -531,13 +531,14 @@ export function apply(ctx: Context, config: Config): void {
 
       let text: string | undefined
       if (args.text !== undefined) {
-        text = args.text.trim()
-        if (text.length === 0) throw new Error('memory_update: `text` must not be blank')
-        if (text.length > config.maxTextChars) {
+        const nextText = (args.text as string).trim()
+        if (nextText.length === 0) throw new Error('memory_update: `text` must not be blank')
+        if (nextText.length > config.maxTextChars) {
           throw new Error(
-            `memory_update: \`text\` is ${text.length} chars, over the ${config.maxTextChars} limit`,
+            `memory_update: \`text\` is ${nextText.length} chars, over the ${config.maxTextChars} limit`,
           )
         }
+        text = nextText
       }
 
       const scope = args.scope !== undefined
