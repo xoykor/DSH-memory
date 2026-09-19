@@ -25,6 +25,8 @@ export type * from './store.ts'
 export const name = 'memory'
 export const inject = ['tools', 'systemPrompt']
 
+export type MemoryPolicy = 'minimal' | 'guided' | 'strict'
+
 export interface Config {
   path: string
   /** Number of non-pinned memories selected by deterministic recall ranking. */
@@ -36,6 +38,8 @@ export interface Config {
   searchLimitDefault: number
   searchLimitMax: number
   promptOrder: number
+  /** How strongly the system prompt instructs the active model to use memory tools. */
+  memoryPolicy: MemoryPolicy
 
   dedupSimilarityThreshold: number
   reviewSimilarityThreshold: number
@@ -59,6 +63,7 @@ export const Config: z<Config> = z.object({
   searchLimitDefault: z.number().default(10),
   searchLimitMax: z.number().default(50),
   promptOrder: z.number().default(50),
+  memoryPolicy: z.union(['minimal', 'guided', 'strict'] as const).default('guided'),
 
   dedupSimilarityThreshold: z.number().default(0.9),
   reviewSimilarityThreshold: z.number().default(0.65),
@@ -96,6 +101,30 @@ const STATS_DESCRIPTION =
 
 const FORGET_DESCRIPTION =
   'Delete one stored memory by id when the fact is wrong, obsolete, or intentionally discarded.'
+
+const GUIDED_POLICY = [
+  'Memory policy:',
+  '- Use memory_search when information from prior sessions may materially matter and is not already recalled below.',
+  '- Use memory_write when you learn a new durable fact likely to matter in a future session.',
+  '- Use memory_update when a stored durable fact changes; do not create a stale second copy.',
+  '- Do not store transient task state, logs, secrets, or facts easily recovered from the repository.',
+  '- Avoid memory tool calls when the task contains no durable information.',
+].join('\n')
+
+const STRICT_POLICY = [
+  'Memory policy (strict):',
+  '- Before relying on an assumption about the user, environment, or project, check recalled memories; if the needed prior-session fact is absent, use memory_search.',
+  '- Before finishing a task, store newly learned durable facts that are likely to matter in future sessions with memory_write.',
+  '- When a durable fact changes, use memory_update on the existing memory instead of writing a replacement.',
+  '- Prefer a stable canonical key for facts that should have one current value, such as environment.shell, environment.os, project.runtime, or project.package-manager.',
+  '- Never store transient task state, logs, intermediate results, secrets, or facts easily recovered from the repository.',
+  '- Do not call memory tools merely to satisfy this policy when no prior or durable information is relevant.',
+].join('\n')
+
+export function renderMemoryPolicy(policy: MemoryPolicy): string {
+  if (policy === 'minimal') return ''
+  return policy === 'strict' ? STRICT_POLICY : GUIDED_POLICY
+}
 
 function promptLine(record: MemoryRecord): string {
   const tags = record.tags.length > 0 ? ` [${record.tags}]` : ''
@@ -229,6 +258,12 @@ export function apply(ctx: Context, config: Config): void {
     if (!store) throw new Error('memory: store is not open')
     return store
   }
+
+  ctx.systemPrompt.section({
+    name: 'memory:policy',
+    order: config.promptOrder - 1,
+    text: () => renderMemoryPolicy(config.memoryPolicy),
+  })
 
   ctx.systemPrompt.section({
     name: 'memory:recall',
