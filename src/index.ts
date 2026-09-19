@@ -8,7 +8,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineMemoryTool } from './tool.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import {
   MemoryStore,
@@ -278,7 +278,7 @@ export function apply(ctx: Context, config: Config): void {
     ),
   })
 
-  ctx.tools.register(defineTool({
+  ctx.tools.register(defineMemoryTool({
     name: 'memory_write',
     description: WRITE_DESCRIPTION,
     parameters: {
@@ -460,7 +460,7 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
+  ctx.tools.register(defineMemoryTool({
     name: 'memory_update',
     description: UPDATE_DESCRIPTION,
     parameters: {
@@ -619,7 +619,7 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
+  ctx.tools.register(defineMemoryTool({
     name: 'memory_search',
     description: SEARCH_DESCRIPTION,
     parameters: {
@@ -719,7 +719,7 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
+  ctx.tools.register(defineMemoryTool({
     name: 'memory_stats',
     description: STATS_DESCRIPTION,
     parameters: {
@@ -786,7 +786,7 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
+  ctx.tools.register(defineMemoryTool({
     name: 'memory_review',
     description: REVIEW_DESCRIPTION,
     parameters: {
@@ -909,7 +909,7 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
+  ctx.tools.register(defineMemoryTool({
     name: 'memory_forget',
     description: FORGET_DESCRIPTION,
     parameters: {
