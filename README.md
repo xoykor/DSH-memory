@@ -310,4 +310,4 @@ CI runs against Node 22.19 and Node 24.
 
 ## License / upstream
 
-MIT. Based on the MIT-licensed `ben7am1n/dsh-memory` implementation.
+GNU General Public License v3.0 (`GPL-3.0-only`) for this fork. Portions derived from the MIT-licensed `ben7am1n/dsh-memory` implementation retain their upstream MIT notice; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
