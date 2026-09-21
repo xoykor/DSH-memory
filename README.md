@@ -1,8 +1,35 @@
 # DSH-memory
 
-Curated durable memory for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+Curated durable memory for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), designed for long-running local-agent sessions where persistent facts need to remain useful without requiring a second model.
 
 This fork keeps the lightweight architecture of [ben7am1n/dsh-memory](https://github.com/ben7am1n/dsh-memory): one local SQLite database with FTS5, **no embedding service, no API key, no sidecar process, and no second model**.
+
+## Design goals
+
+- keep durable memory **local and inspectable**;
+- avoid embeddings, external APIs and auxiliary LLMs;
+- reduce duplicate or conflicting memories before they pollute recall;
+- rank recall deterministically using explicit metadata;
+- preserve history through archive/restore instead of destructive cleanup;
+- keep tool use optional so stronger models are not forced into unnecessary memory calls.
+
+## Architecture
+
+```text
+DSH
+ ├─ system prompt injection
+ ├─ memory tools
+ │   ├─ write / update
+ │   ├─ search
+ │   ├─ review / stats
+ │   └─ forget
+ └─ SQLite
+     ├─ durable records
+     ├─ scopes + metadata
+     └─ FTS5 index
+```
+
+All curation and ranking logic runs locally and deterministically.
 
 ## Curation model
 
@@ -296,6 +323,14 @@ All curation uses:
 - deterministic ranking and lifecycle rules.
 
 The model already running in DSH decides what deserves memory and when to use the tools. No second LLM or embedding model needs to stay in RAM/VRAM.
+
+## Operational notes
+
+- Recall is injected automatically according to the configured policy; a model does not need to search on every turn.
+- `guided` is intended as the balanced default for local models.
+- Canonical keys are useful for durable facts that must have one active value per scope.
+- Archive is preferred over deletion when a memory may still be useful for history or debugging.
+- The database should be backed up before schema experiments or manual edits.
 
 ## Development
 
