@@ -32,7 +32,7 @@
   "bugs": {
     "url": "https://github.com/xoykor/DSH-memory/issues"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
